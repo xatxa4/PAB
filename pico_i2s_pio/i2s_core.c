@@ -529,9 +529,10 @@ void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_leng
         while (dma_channel_is_busy(i2s_dma_chan_a) || dma_channel_is_busy(i2s_dma_chan_b)) tight_loop_contents();
         __compiler_memory_barrier();
 
-        dma_channel_set_transfer_count(i2s_dma_chan_a, tx_length, false);
+        // upstream calls dma_channel_set_transfer_count, added in pico-sdk 2.2.0
+        dma_channel_set_trans_count(i2s_dma_chan_a, tx_length, false);
         dma_channel_set_read_addr(i2s_dma_chan_a, tx_buf_a, false);
-        dma_channel_set_transfer_count(i2s_dma_chan_b, tx_length, false);
+        dma_channel_set_trans_count(i2s_dma_chan_b, tx_length, false);
         dma_channel_set_read_addr(i2s_dma_chan_b, tx_buf_b, false);
 
         dma_start_channel_mask(mask);

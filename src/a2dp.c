@@ -9,9 +9,7 @@
 #include <pico/cyw43_arch.h>
 
 #include "avrcp.h"
-
-// from btstack_audio_pico.c
-const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void);
+#include "btstack_audio_pico_i2s.h"
 
 
 #define OPTIMAL_FRAMES_MIN 20

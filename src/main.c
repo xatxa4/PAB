@@ -3,6 +3,7 @@
 #include "hardware/watchdog.h"
 
 #include "bt.h"
+#include "btstack_audio_pico_i2s.h"
 
 
 // Unrecoverable error happened. Reboot by setting watchdog.
@@ -37,6 +38,10 @@ void on_bt_up( void * ) {
 
 
 int main() {
+    // Before stdio and cyw43: in low jitter mode this re-runs the system PLL,
+    // and both latch clock dividers at their own init.
+    btstack_audio_pico_i2s_begin();
+
     stdio_init_all();
 
     // initialize CYW43 driver architecture (will enable BT if/because CYW43_ENABLE_BLUETOOTH == 1)
