@@ -1,0 +1,236 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2025 BambooMaster
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ */
+
+;i2s BCLK64fs MCLK256fs
+.program i2s_mclk
+set pins, 0
+set pins, 1
+
+
+
+;i2s BCLK64fs MCLK NO
+.program i2s_data
+.side_set 2
+;                      /--BCLK
+;                      |/-LRCLK
+;                      ||
+pull block      side 0b10
+
+out pins, 1     side 0b00
+set x, 29       side 0b10
+
+L1:
+out pins, 1     side 0b00
+jmp x--, L1     side 0b10
+
+out pins, 1     side 0b01
+pull block      side 0b11
+
+out pins, 1     side 0b01
+set x, 29       side 0b11
+
+L2:
+out pins, 1     side 0b01
+jmp x--, L2     side 0b11
+
+out pins, 1     side 0b00
+
+
+;lsbj16
+.program i2s_pt8211
+.side_set 2
+;                      /--BCK
+;                      |/-WS
+;                      ||
+pull block      side 0b10 [1]
+
+out pins, 1     side 0b01 [1]
+set x, 13       side 0b11 [1]
+
+L1:
+out pins, 1     side 0b01 [1]
+jmp x--, L1     side 0b11 [1]
+
+out pins, 1     side 0b01 [1]
+pull block      side 0b11 [1]
+
+out pins, 1     side 0b00 [1]
+set x, 13       side 0b10 [1]
+
+L2:
+out pins, 1     side 0b00 [1]
+jmp x--, L2     side 0b10 [1]
+
+out pins, 1     side 0b00 [1]
+
+
+;i2s BCLK32fs AK449X EXDF
+.program i2s_exdf_a
+.side_set 3
+;                      /---MCLK
+;                      |/--BCK
+;                      ||/-WCK
+;                      |||
+pull block      side 0b111 [1]
+
+out pins, 1     side 0b000 [1]
+set x, 13       side 0b110 [1]
+
+L1:
+out pins, 1     side 0b000 [1]
+jmp x--, L1     side 0b110 [1]
+
+out pins, 1     side 0b000 [1]
+nop             side 0b110 [1]
+
+out pins, 1     side 0b001 [1]
+set x, 13       side 0b111 [1]
+
+L2:
+out pins, 1     side 0b001 [1]
+jmp x--, L2     side 0b111 [1]
+
+out pins, 1     side 0b001 [1]
+
+
+;i2s BCLK32fs AK449X EXDF
+.program i2s_exdf_b
+
+pull block      [1]
+
+out pins, 1     [1]
+set x, 13       [1]
+
+L1:
+out pins, 1     [1]
+jmp x--, L1     [1]
+
+out pins, 1     [1]
+nop             [1]
+
+out pins, 1     [1]
+set x, 13       [1]
+
+L2:
+out pins, 1     [1]
+jmp x--, L2     [1]
+
+out pins, 1     [1]
+
+
+;i2s BCLK64fs NO MCLK DUAL
+.program i2s_data_dual
+
+pull block
+
+out pins, 1
+set x, 29
+
+L1:
+out pins, 1
+jmp x--, L1
+
+out pins, 1
+pull block
+
+out pins, 1
+set x, 29
+
+L2:
+out pins, 1
+jmp x--, L2
+
+out pins, 1
+
+
+
+;lsbj16_dual
+.program i2s_pt8211_dual
+;                      /--BCK
+;                      |/-WS
+;                      ||
+pull block      [1]
+
+out pins, 1     [1]
+set x, 13       [1]
+
+L1:
+out pins, 1     [1]
+jmp x--, L1     [1]
+
+out pins, 1     [1]
+pull block      [1]
+
+out pins, 1     [1]
+set x, 13       [1]
+
+L2:
+out pins, 1     [1]
+jmp x--, L2     [1]
+
+out pins, 1     [1]
+
+
+;i2s_slave
+.program i2s_slave
+;in pin 0   LRCLK
+;in pin 1   BCLK
+;r LSB
+    wait 0 pin 0
+    out pins 1
+    wait 1 pin 1
+    pull block
+
+;l MSB
+    wait 1 pin 1
+    out pins 1
+    wait 0 pin 1
+    set y 29
+
+;l nbit
+L_LOOP:
+    wait 1 pin 1
+    out pins 1
+    wait 0 pin 1
+    jmp y-- L_LOOP
+
+;l LSB
+    wait 1 pin 0
+    out pins 1
+    wait 0 pin 1
+    pull block
+
+;r MSB
+    wait 1 pin 1
+    out pins 1
+    wait 0 pin 1
+    set y 29
+
+;r nbit
+R_LOOP:
+    wait 1 pin 1
+    out pins 1
+    wait 0 pin 1
+    jmp y-- R_LOOP
