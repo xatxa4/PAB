@@ -54,10 +54,17 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     BT_NAME="PicoW"
 )
 
+# Debug output: usb | uart | none.
+#   usb   development default. Costs a periodic TinyUSB task on core0 forever,
+#         and occupies the USB peripheral.
+#   uart  frees USB, e.g. for a future UAC sound-card mode. Needs a probe.
+#   none  lowest jitter, no console. What a finished build should ship with.
+if (NOT DEFINED PAB_STDIO)
+    set(PAB_STDIO usb)
+endif()
+
 target_link_libraries(${PROJECT_NAME}
     pico_stdlib
-    pico_stdio_usb  # use usb, not uart for stdio
-    # pico_stdio_uart  # use uart, not usb for stdio e.g. via picoprobe
     hardware_clocks
     hardware_dma
     hardware_pio
@@ -70,5 +77,14 @@ target_link_libraries(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR} # For btstack config
 )
+
+if (PAB_STDIO STREQUAL "usb")
+    target_link_libraries(${PROJECT_NAME} pico_stdio_usb)
+elseif (PAB_STDIO STREQUAL "uart")
+    target_link_libraries(${PROJECT_NAME} pico_stdio_uart)
+elseif (NOT PAB_STDIO STREQUAL "none")
+    message(FATAL_ERROR "PAB_STDIO must be usb, uart or none (got '${PAB_STDIO}')")
+endif()
+message(STATUS "PAB stdio: ${PAB_STDIO}")
 
 pico_add_extra_outputs(${PROJECT_NAME})
