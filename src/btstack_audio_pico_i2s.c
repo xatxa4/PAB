@@ -112,6 +112,12 @@ static volatile uint8_t next_buffer;
 // scratch for the 16 bit samples coming out of the A2DP pipeline
 static int16_t render_pcm[PICO_AUDIO_I2S_BUFFER_FRAMES * 2];
 
+// AVRCP volume 0..127 as a 0..65536 multiplier. 65536 is unity and also
+// left-aligns the 16 bit sample into the 32 bit frame, so the gain rides along
+// in the multiply that replaces the old shift and costs nothing extra. A
+// 16 bit sample times 65536 is exactly INT32_MIN..INT32_MAX, so it cannot clip.
+static volatile int32_t volume_gain = 65536;
+
 static void __time_critical_func(i2s_dma_handler)(void){
     for (uint8_t c = 0; c < 2; c++){
         if ((dma_hw->ints0 & (1u << i2s_dma_chan[c])) == 0) continue;
@@ -165,7 +171,6 @@ static void i2s_start(uint32_t sample_rate){
     pio_gpio_init(pio, PICO_AUDIO_I2S_DATA_PIN);
     pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE);
     pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE + 1);
-    pio_gpio_init(pio, PICO_AUDIO_I2S_MCLK_PIN);
 
 #if I2S_HAVE_MCLK
     i2s_mclk_sm = pio_claim_unused_sm(pio, true);
@@ -229,18 +234,18 @@ static void btstack_audio_pico_sink_fill_buffers(void){
 
         (*playback_callback)(render_pcm, PICO_AUDIO_I2S_BUFFER_FRAMES);
 
-        // 16 bit PCM sits in the top half of the 32 bit I2S frame; shift as
-        // unsigned, negative operands make the signed shift undefined
+        // widen to the 32 bit frame and apply volume in one multiply
+        int32_t gain = volume_gain;
         int32_t * dst = audio_buffer[i];
         if (sink_channel_count == 1){
             for (int f = 0; f < PICO_AUDIO_I2S_BUFFER_FRAMES; f++){
-                int32_t sample = (int32_t) ((uint32_t) render_pcm[f] << 16);
+                int32_t sample = (int32_t) render_pcm[f] * gain;
                 dst[2 * f    ] = sample;
                 dst[2 * f + 1] = sample;
             }
         } else {
             for (int w = 0; w < BUFFER_WORDS; w++){
-                dst[w] = (int32_t) ((uint32_t) render_pcm[w] << 16);
+                dst[w] = (int32_t) render_pcm[w] * gain;
             }
         }
 
@@ -292,8 +297,8 @@ static int btstack_audio_pico_sink_init(
 }
 
 static void btstack_audio_pico_sink_set_volume(uint8_t volume){
-    // AVRCP volume is applied to the decoded PCM in a2dp.c
-    UNUSED(volume);
+    if (volume > 127) volume = 127;
+    volume_gain = ((int32_t) volume + 1) * 512;   // 0 -> -42dB, 127 -> unity
 }
 
 static void btstack_audio_pico_sink_start_stream(void){
