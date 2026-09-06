@@ -337,3 +337,9 @@ static const btstack_audio_sink_t btstack_audio_pico_sink = {
 const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void){
     return &btstack_audio_pico_sink;
 }
+
+uint32_t btstack_audio_pico_sink_latency_us(uint32_t sample_rate){
+    if (sample_rate == 0) return 0;
+    uint32_t frames = PICO_AUDIO_I2S_NUM_BUFFERS * PICO_AUDIO_I2S_BUFFER_FRAMES;
+    return (uint32_t) (((uint64_t) frames * 1000000u) / sample_rate);
+}

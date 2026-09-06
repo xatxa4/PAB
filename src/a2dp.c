@@ -50,6 +50,7 @@ static const uint8_t _sbc_capabilities[] = {
     2, 53
 };
 uint8_t _seid = 0;
+uint16_t _cid = 0;
 stream_state_t _stream_state = STREAM_STATE_CLOSED;
 sbc_configuration_t _sbc_configuration = {0};
 btstack_sbc_decoder_state_t _state = {0};
@@ -154,6 +155,21 @@ static void media_processing_init(sbc_configuration_t * configuration) {
 }
 
 
+// Tell the source how far behind we are so it can delay the video to match,
+// rather than us shrinking buffers and hoping. Counts the SBC frames the
+// resampler aims to keep queued plus everything already handed to the sink.
+static void report_delay(void) {
+    uint32_t sample_rate = _sbc_configuration.sampling_frequency;
+    if ((_cid == 0) || (sample_rate == 0)) return;
+
+    uint32_t sbc_frames = (OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2;
+    uint32_t queued_us  = (uint32_t) (((uint64_t) sbc_frames * 128 * 1000000u) / sample_rate);
+    uint32_t total_us   = queued_us + btstack_audio_pico_sink_latency_us(sample_rate);
+
+    avdtp_sink_delay_report(_cid, _seid, (uint16_t) (total_us / 100));
+}
+
+
 static void media_processing_start(void) {
     if (!_media_initialized) return;
 
@@ -253,6 +269,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // a2dp_subevent_stream_established_get_bd_addr(packet, _addr);
             // _cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);
             _seid = a2dp_subevent_stream_established_get_local_seid(packet);
+            _cid  = a2dp_subevent_stream_established_get_a2dp_cid(packet);
             _stream_state = STREAM_STATE_OPEN;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             gpio_put(CONN_PIN, 1);
@@ -273,6 +290,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             }
             // prepare media processing
             media_processing_init(&_sbc_configuration);
+            report_delay();
             // audio stream is started when buffer reaches minimal level
             break;
         
@@ -285,6 +303,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
         case A2DP_SUBEVENT_STREAM_RELEASED:
             // printf("A2DP  Sink      : Stream released\n");
             _stream_state = STREAM_STATE_CLOSED;
+            _cid = 0;
             media_processing_close();
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
@@ -436,4 +455,7 @@ void a2dp_sink_begin() {
         _sbc_capabilities, sizeof(_sbc_capabilities),
         sbc_configuration, sizeof(sbc_configuration));
     _seid = avdtp_local_seid(endpoint);
+
+    // lets the source ask for our latency and sync video to it
+    avdtp_sink_register_delay_reporting_category(_seid);
 }
