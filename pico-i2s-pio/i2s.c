@@ -45,7 +45,27 @@ static int i2s_dma_chan_a, i2s_dma_chan_b;
 static CLOCK_MODE i2s_clock_mode = CLOCK_MODE_DEFAULT;
 static I2S_MODE i2s_mode        = MODE_I2S;
 
-static atomic_uint i2s_sample_rate_hz = 44100;
+static atomic_int queue_write = 0;
+static atomic_int queue_read = 0;
+static volatile int32_t queue_l[I2S_QUEUE_MAX];
+static volatile int32_t queue_r[I2S_QUEUE_MAX];
+static atomic_uint i2s_freq = 44100;
+static int32_t mul_l, mul_r;
+
+// -100dB ~ 0dB (1dB step)
+static const int32_t db_to_vol[101] = {
+	0x20000000,     0x1c8520af,     0x196b230b,     0x16a77dea,     0x1430cd74,     0x11feb33c,     0x1009b9cf,     0xe4b3b63,      0xcbd4b3f,      0xb5aa19b,
+    0xa1e89b1,      0x904d1bd,      0x809bcc3,      0x729f5d9,      0x66284d5,      0x5b0c438,      0x5125831,      0x4852697,      0x4074fcb,      0x3972853,
+    0x3333333,      0x2da1cde,      0x28ab6b4,      0x243f2fd,      0x204e158,      0x1ccab86,      0x19a9294,      0x16dec56,      0x146211f,      0x122a9c2,
+    0x1030dc4,      0xe6e1c6,       0xcdc613,       0xb76562,       0xa373ae,       0x91ad38,       0x81d59e,       0x73b70f,       0x672194,       0x5bea6e,
+    0x51eb85,       0x4902e3,       0x411245,       0x39feb2,       0x33b022,       0x2e1127,       0x290ea8,       0x2497a2,       0x209ce9,       0x1d10f9,
+    0x19e7c6,       0x171693,       0x1493ce,       0x1256f0,       0x10585e,       0xe9152,        0xcfbc3,        0xb924e,        0xa5028,        0x9310b,
+    0x83126,        0x74d16,        0x681d3,        0x5ccab,        0x52b36,        0x49b50,        0x41b10,        0x3a8c3,        0x342e4,        0x2e818,
+    0x2972d,        0x24f0e,        0x20ec7,        0x1d57e,        0x1a26f,        0x174ee,        0x14c60,        0x1283b,        0x10804,        0xeb4d,
+    0xd1b7,         0xbae8,         0xa695,         0x9477,         0x8452,         0x75ee,         0x691b,         0x5dad,         0x537d,         0x4a68,
+    0x4251,         0x3b1b,         0x34ad,         0x2ef3,         0x29d7,         0x254b,         0x213c,         0x1d9f,         0x1a66,         0x1787,
+    0x14f8,
+};
 
 /**
  * @brief システムクロックを180.75MHzに設定する
@@ -93,14 +113,14 @@ static void set_sys_clock_gpin1(void){
     clock_configure_gpin(clk_sys, 22, 49152 * KHZ, 49152 * KHZ);
 }
 
-void i2s_set_pin(uint data_pin, uint clock_pin_base, uint mclk_pin){
+void i2s_mclk_set_pin(uint data_pin, uint clock_pin_base, uint mclk_pin){
     i2s_dout_pin = data_pin;
     i2s_clk_pin_base = clock_pin_base;
     i2s_mclk_pin = mclk_pin;
 }
 
 // ロージッターモードを使うときはuart,i2c,spi設定よりも先に呼び出す
-void i2s_set_config(PIO pio, CLOCK_MODE clock_mode, I2S_MODE mode){
+void i2s_mclk_set_config(PIO pio, CLOCK_MODE clock_mode, I2S_MODE mode){
     i2s_pio = pio;
     i2s_sm = pio_claim_unused_sm(pio, true);
     i2s_mclk_sm = pio_claim_unused_sm(pio, true);
@@ -121,7 +141,7 @@ I2S_MODE i2s_get_i2s_mode(void){
     return i2s_mode;
 }
 
-void i2s_pio_init(void){
+void i2s_init(void){
     pio_sm_config sm_config, sm_config_mclk;
     PIO pio = i2s_pio;
     uint data_pin = i2s_dout_pin;
@@ -160,7 +180,7 @@ void i2s_pio_init(void){
     pio_sm_set_enabled(pio, i2s_sm, true);
 }
 
-void pt8211_pio_init(void){
+void pt8211_init(void){
     pio_sm_config sm_config;
     PIO pio = i2s_pio;
     uint sm = i2s_sm;
@@ -191,7 +211,7 @@ void pt8211_pio_init(void){
     pio_sm_set_enabled(pio, sm, true);
 }
 
-void exdf_pio_init(void){
+void exdf_init(void){
     pio_sm_config sm_config;
     PIO pio = i2s_pio;
     uint data_pin = i2s_dout_pin;
@@ -236,7 +256,7 @@ void exdf_pio_init(void){
     pio_enable_sm_mask_in_sync(pio, i2s_sm_mask);
 }
 
-void i2s_dual_pio_init(void){
+void i2s_dual_init(void){
     pio_sm_config sm_config, sm_config_mclk;
     PIO pio = i2s_pio;
     uint data_pin = i2s_dout_pin;
@@ -289,7 +309,7 @@ void i2s_dual_pio_init(void){
     pio_enable_sm_mask_in_sync(pio, i2s_sm_mask);
 }
 
-void pt8211_dual_pio_init(void){
+void pt8211_dual_init(void){
     pio_sm_config sm_config;
     PIO pio = i2s_pio;
     uint sm = i2s_sm;
@@ -334,7 +354,7 @@ void pt8211_dual_pio_init(void){
     pio_enable_sm_mask_in_sync(pio, i2s_sm_mask);
 }
 
-void i2s_slave_pio_init(void){
+void i2s_slave_init(void){
     pio_sm_config sm_config;
     PIO pio = i2s_pio;
     uint sm = i2s_sm;
@@ -362,32 +382,32 @@ void i2s_slave_pio_init(void){
     pio_sm_set_enabled(pio, sm, true);
 }
 
-void i2s_init(uint32_t sample_rate_hz){
+void i2s_mclk_init(uint32_t audio_clock){
     pio_sm_config sm_config, sm_config_mclk;
     PIO pio = i2s_pio;
     uint sm = i2s_sm;
 
     switch (i2s_mode){
         case MODE_I2S:
-            i2s_pio_init();
+            i2s_init();
             break;
         case MODE_PT8211:
-            pt8211_pio_init();
+            pt8211_init();
             break;
         case MODE_EXDF:
-            exdf_pio_init();
+            exdf_init();
             break;
         case MODE_I2S_DUAL:
-            i2s_dual_pio_init();
+            i2s_dual_init();
             break;
         case MODE_PT8211_DUAL:
-            pt8211_dual_pio_init();
+            pt8211_dual_init();
             break;
         case MODE_I2S_SLAVE:
-            i2s_slave_pio_init();
+            i2s_slave_init();
             break;
     }
-    i2s_change_clock(sample_rate_hz);
+    i2s_mclk_change_clock(audio_clock);
 
     // dma init
     i2s_dma_chan_a = dma_claim_unused_channel(true);
@@ -427,12 +447,12 @@ void i2s_init(uint32_t sample_rate_hz){
     }
 }
 
-void i2s_change_clock(uint32_t sample_rate_hz){
+void i2s_mclk_change_clock(uint32_t audio_clock){
     // 周波数変更
-    atomic_store(&i2s_sample_rate_hz, sample_rate_hz);
+    atomic_store(&i2s_freq, audio_clock);
     
     if (i2s_mode == MODE_I2S_SLAVE){
-        if (sample_rate_hz % 48000 == 0){
+        if (audio_clock % 48000 == 0){
             // ここで外部のクロック変更
             // picoのGPIOクロック出力だとクロック間の同期ができない
         }
@@ -443,7 +463,7 @@ void i2s_change_clock(uint32_t sample_rate_hz){
     }
     else if (i2s_clock_mode == CLOCK_MODE_DEFAULT){
         float div;
-        div = (float)clock_get_hz(clk_sys) / (float)(sample_rate_hz * 128);
+        div = (float)clock_get_hz(clk_sys) / (float)(audio_clock * 128);
 
         if (i2s_mode == MODE_I2S_DUAL || i2s_mode == MODE_PT8211_DUAL || i2s_mode == MODE_EXDF){
             pio_set_sm_mask_enabled(i2s_pio, i2s_sm_mask, false);
@@ -457,7 +477,7 @@ void i2s_change_clock(uint32_t sample_rate_hz){
 
         // mclk
         if (i2s_mode == MODE_I2S || i2s_mode == MODE_I2S_DUAL){
-            if (sample_rate_hz % 48000 == 0){
+            if (audio_clock % 48000 == 0){
                 div = (float)clock_get_hz(clk_sys) / (49.152f * (float)MHZ);
                 pio_sm_set_clkdiv(i2s_pio, i2s_mclk_sm, div);
             }
@@ -482,15 +502,15 @@ void i2s_change_clock(uint32_t sample_rate_hz){
 
         // pio周波数変更
         uint dev;
-        if (sample_rate_hz % 48000 == 0){
+        if (audio_clock % 48000 == 0){
             switch (i2s_clock_mode){
                 case CLOCK_MODE_LOW_JITTER:
                     set_sys_clock_196500khz();
-                    dev = 8 * 192000 / sample_rate_hz;
+                    dev = 8 * 192000 / audio_clock;
                     break;
                 case CLOCK_MODE_EXTERNAL:
                     set_sys_clock_gpin1();
-                    dev = 2 * 192000 / sample_rate_hz;
+                    dev = 2 * 192000 / audio_clock;
                     break;
             }
         }
@@ -498,11 +518,11 @@ void i2s_change_clock(uint32_t sample_rate_hz){
             switch (i2s_clock_mode){
                 case CLOCK_MODE_LOW_JITTER:
                     set_sys_clock_180750khz();
-                    dev = 8 * 176400 / sample_rate_hz;
+                    dev = 8 * 176400 / audio_clock;
                     break;
                 case CLOCK_MODE_EXTERNAL:
                     set_sys_clock_gpin0();
-                    dev = 2 * 176400 / sample_rate_hz;
+                    dev = 2 * 176400 / audio_clock;
                     break;
             }
         }
@@ -519,31 +539,141 @@ void i2s_change_clock(uint32_t sample_rate_hz){
     }
 }
 
-uint32_t i2s_get_sample_rate_hz(void){
-    return atomic_load(&i2s_sample_rate_hz);
-}
+bool i2s_enqueue(int32_t *buf_l, int32_t *buf_r, int length){
+    if ((I2S_QUEUE_MAX - 1 - i2s_get_queue_length()) < length) return false;
 
-void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_length){
-    if (i2s_mode == MODE_I2S_DUAL || i2s_mode == MODE_PT8211_DUAL || i2s_mode == MODE_EXDF){
-        uint32_t mask = (1u << i2s_dma_chan_a) | (1u << i2s_dma_chan_b);
-        while (dma_channel_is_busy(i2s_dma_chan_a) || dma_channel_is_busy(i2s_dma_chan_b)) tight_loop_contents();
-        __compiler_memory_barrier();
+    int w = atomic_load(&queue_write);
 
-        dma_channel_set_trans_count(i2s_dma_chan_a, tx_length, false);
-        dma_channel_set_read_addr(i2s_dma_chan_a, tx_buf_a, false);
-        dma_channel_set_trans_count(i2s_dma_chan_b, tx_length, false);
-        dma_channel_set_read_addr(i2s_dma_chan_b, tx_buf_b, false);
-
-        dma_start_channel_mask(mask);
+    int chunk1, chunk2;
+    if (w + length >= I2S_QUEUE_MAX){
+        chunk1 = I2S_QUEUE_MAX - w;
+        chunk2 = length - chunk1;
     }
     else{
-        dma_channel_wait_for_finish_blocking(i2s_dma_chan_a);
-        dma_channel_transfer_from_buffer_now(i2s_dma_chan_a, tx_buf_a, tx_length);
+        chunk1 = length;
+        chunk2 = 0;
+    }
+
+    for (int i = 0; i < chunk1; i++){
+        queue_l[w + i] = buf_l[i];
+        queue_r[w + i] = buf_r[i];
+    }
+    for (int i = 0; i < chunk2; i++){
+        queue_l[i] = buf_l[chunk1 + i];
+        queue_r[i] = buf_r[chunk1 + i];
+    }
+
+    w += length;
+    if (w >= I2S_QUEUE_MAX) w -= I2S_QUEUE_MAX;
+    atomic_thread_fence(memory_order_release);
+    atomic_store(&queue_write, w);
+    return true;
+}
+
+int i2s_dequeue(int32_t *buf_l, int32_t *buf_r, int length){
+    int read_length = i2s_get_queue_length();
+    if (read_length <= 0) return 0;
+
+    if (read_length > length) read_length = length;
+    int r = atomic_load(&queue_read);
+
+    int chunk1, chunk2;
+    if (r + read_length >= I2S_QUEUE_MAX){
+        chunk1 = I2S_QUEUE_MAX - r;
+        chunk2 = read_length - chunk1;
+    }
+    else{
+        chunk1 = read_length;
+        chunk2 = 0;
+    }
+
+    for (int i = 0; i < chunk1; i++){
+        buf_l[i] = queue_l[r + i];
+        buf_r[i] = queue_r[r + i];
+    }
+    for (int i = 0; i < chunk2; i++){
+        buf_l[chunk1 + i] = queue_l[i];
+        buf_r[chunk1 + i] = queue_r[i];
+    }
+
+    r += read_length;
+    if (r >= I2S_QUEUE_MAX) r -= I2S_QUEUE_MAX;
+    atomic_thread_fence(memory_order_release);
+    atomic_store(&queue_read, r);
+    return read_length;
+}
+
+int i2s_get_queue_length(void){
+    int w = atomic_load(&queue_write);
+    int r = atomic_load(&queue_read);
+
+    if (w >= r) return w - r;
+    return I2S_QUEUE_MAX - r + w;
+}
+
+int i2s_unpack_uacdata(uint8_t* in, int sample, uint8_t resolution, int32_t *buf_l, int32_t *buf_r){
+    if (resolution == 16){
+        int16_t *d = (int16_t*)in;
+        sample /= 2;
+        for (int i = 0; i < sample / 2; i++){
+            buf_l[i] = *d++ << 16;
+            buf_r[i] = *d++ << 16;
+        }
+    }
+    else if (resolution == 24){
+        uint8_t *d = in;
+        int32_t e;
+        sample /= 3;
+        for (int i = 0; i < sample / 2; i++){
+            e = 0;
+            e |= *d++ << 8;
+            e |= *d++ << 16;
+            e |= *d++ << 24;
+            buf_l[i] = e;
+            e = 0;
+            e |= *d++ << 8;
+            e |= *d++ << 16;
+            e |= *d++ << 24;
+            buf_r[i] = e;
+        }
+    }
+    else if (resolution == 32){
+        int32_t *d = (int32_t*)in;
+        sample /= 4;
+        for (int i = 0; i < sample / 2; i++){
+            buf_l[i] = *d++;
+            buf_r[i] = *d++;
+        }
+    }
+
+    return sample / 2;
+}
+
+void i2s_volume_change(int16_t v, int8_t ch){
+    v = -v >> 8;
+    if (v > 100) v = 100;
+    else if (v < 0) v = 0;
+
+    if (ch == 0){
+        mul_l = db_to_vol[v];
+        mul_r = db_to_vol[v];
+    }
+    else if (ch == 1){
+        mul_l = db_to_vol[v];
+    }
+    else if (ch == 2){
+        mul_r = db_to_vol[v];
+    }
+}
+
+void i2s_volume(int32_t *buf_l, int32_t *buf_r, int length){
+    for (int i = 0; i < length; i++){
+        buf_l[i] = (int32_t)(((int64_t)buf_l[i] * mul_l) >> 29u);
+        buf_r[i] = (int32_t)(((int64_t)buf_r[i] * mul_r) >> 29u);
     }
 }
 
 int i2s_format_piodata(int32_t *buf_l, int32_t *buf_r, int length, uint32_t *tx_buf_a, uint32_t *tx_buf_b){
-    I2S_MODE i2s_mode = i2s_get_i2s_mode();
     if (i2s_mode == MODE_EXDF){
         for (int i = 0; i < length; i++){
             tx_buf_a[i] = buf_l[i];
@@ -586,4 +716,26 @@ int i2s_format_piodata(int32_t *buf_l, int32_t *buf_r, int length, uint32_t *tx_
     }
 
     return length;
+}
+
+void i2s_dma_transfer_blocking(int32_t *tx_buf_a, int32_t *tx_buf_b, int tx_length){
+    if (i2s_mode == MODE_I2S_DUAL || i2s_mode == MODE_PT8211_DUAL || i2s_mode == MODE_EXDF){
+        uint32_t mask = (1u << i2s_dma_chan_a) | (1u << i2s_dma_chan_b);
+        while (dma_channel_is_busy(i2s_dma_chan_a) || dma_channel_is_busy(i2s_dma_chan_b)) tight_loop_contents();
+
+        dma_channel_set_transfer_count(i2s_dma_chan_a, tx_length, false);
+        dma_channel_set_read_addr(i2s_dma_chan_a, tx_buf_a, false);
+        dma_channel_set_transfer_count(i2s_dma_chan_b, tx_length, false);
+        dma_channel_set_read_addr(i2s_dma_chan_b, tx_buf_b, false);
+
+        dma_start_channel_mask(mask);
+    }
+    else{
+        dma_channel_wait_for_finish_blocking(i2s_dma_chan_a);
+        dma_channel_transfer_from_buffer_now(i2s_dma_chan_a, tx_buf_a, tx_length);
+    }
+}
+
+uint32_t i2s_get_freq(void){
+    return atomic_load(&i2s_freq);
 }

@@ -12,6 +12,9 @@
 #include "btstack_audio_pico_i2s.h"
 
 
+// Dominates end to end latency: each SBC frame is 128 samples, so 20..40 frames
+// is ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts
+// lip sync out by a third of a second.
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
 #define ADDITIONAL_FRAMES  10
@@ -135,6 +138,13 @@ static void playback_handler(int16_t * buffer, uint16_t num_audio_frames) {
         uint8_t sbc_frame[MAX_SBC_FRAME_SIZE];
         btstack_ring_buffer_read(&_sbc_frame_ring_buffer, sbc_frame, _sbc_frame_size, &bytes_read);
         btstack_sbc_decoder_process_data(&_state, 0, sbc_frame, _sbc_frame_size);
+    }
+
+    // ran dry: the caller's buffer is reused between calls, so anything we do
+    // not write here would be played again as a chunk of the previous block
+    if (_request_frames) {
+        memset(_request_buffer, 0, _request_frames * BYTES_PER_FRAME);
+        _request_frames = 0;
     }
 }
 
