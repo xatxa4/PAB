@@ -43,9 +43,16 @@
 #define PICO_AUDIO_I2S_CLOCK_PIN_BASE   20
 #endif
 
+// Off by default. usb_sound_card_hires drives MCLK, but it has no radio; joba-1
+// has a radio, but pico-extras never generates MCLK. This build is the only one
+// that would do both, and a 22.5792MHz square wave switching IOVDD next to the
+// CYW43's SPI pins (GP23-25) is a poor neighbour for the Bluetooth link.
+// Set to a pin number only if the DAC actually needs a master clock.
 #ifndef PICO_AUDIO_I2S_MCLK_PIN
-#define PICO_AUDIO_I2S_MCLK_PIN         22
+#define PICO_AUDIO_I2S_MCLK_PIN         -1
 #endif
+
+#define I2S_HAVE_MCLK   (PICO_AUDIO_I2S_MCLK_PIN >= 0)
 
 // The CYW43 driver claims a state machine on the first PIO with room, so leave
 // pio0 to it and keep I2S out of the way.
@@ -77,7 +84,9 @@ static uint8_t  sink_channel_count;
 static uint32_t sink_sample_rate;
 
 static uint i2s_sm;
+#if I2S_HAVE_MCLK
 static uint i2s_mclk_sm;
+#endif
 
 // Two channels chained to each other. When one finishes the other is started by
 // the hardware, so a late IRQ costs nothing until a whole buffer has played -
@@ -141,28 +150,32 @@ static void i2s_set_sample_rate(uint32_t sample_rate){
     // i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs
     pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_sm, (float) sys / (float) (sample_rate * 128));
 
+#if I2S_HAVE_MCLK
     // MCLK is fixed at 22.5792 / 24.576 MHz; i2s_mclk halves its state machine clock
     float mclk_sm_hz = (sample_rate % 48000 == 0) ? 49.152e6f : 45.1584e6f;
     pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_mclk_sm, (float) sys / mclk_sm_hz);
+#endif
 }
 
 static void i2s_start(uint32_t sample_rate){
     PIO pio = PICO_AUDIO_I2S_PIO;
 
-    i2s_sm      = pio_claim_unused_sm(pio, true);
-    i2s_mclk_sm = pio_claim_unused_sm(pio, true);
+    i2s_sm = pio_claim_unused_sm(pio, true);
 
     pio_gpio_init(pio, PICO_AUDIO_I2S_DATA_PIN);
     pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE);
     pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE + 1);
-    pio_gpio_init(pio, PICO_AUDIO_I2S_MCLK_PIN);
 
+#if I2S_HAVE_MCLK
+    i2s_mclk_sm = pio_claim_unused_sm(pio, true);
+    pio_gpio_init(pio, PICO_AUDIO_I2S_MCLK_PIN);
     pio_sm_set_consecutive_pindirs(pio, i2s_mclk_sm, PICO_AUDIO_I2S_MCLK_PIN, 1, true);
     uint offset_mclk = pio_add_program(pio, &i2s_mclk_program);
     pio_sm_config cm = i2s_mclk_program_get_default_config(offset_mclk);
     sm_config_set_set_pins(&cm, PICO_AUDIO_I2S_MCLK_PIN, 1);
     pio_sm_init(pio, i2s_mclk_sm, offset_mclk, &cm);
     pio_sm_set_enabled(pio, i2s_mclk_sm, true);
+#endif
 
     uint offset = pio_add_program(pio, &i2s_data_program);
     pio_sm_config c = i2s_data_program_get_default_config(offset);

@@ -40,7 +40,10 @@ target_sources(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     PICO_AUDIO_I2S_DATA_PIN=18        # DIN
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=20  # =LRCLK/WS, +1=BCK
-    PICO_AUDIO_I2S_MCLK_PIN=22
+    # MCLK off: the ES9038Q2M has its own clock, and a 22.5MHz output next to the
+    # CYW43 SPI pins is the one electrical difference from joba-1's working build.
+    # Set to 22 to drive it on GP22 again.
+    # PICO_AUDIO_I2S_MCLK_PIN=22
     PICO_AUDIO_I2S_PIO=pio1
     # ~46ms of audio queued ahead of the DAC. Lower for less delay.
     PICO_AUDIO_I2S_NUM_BUFFERS=4
