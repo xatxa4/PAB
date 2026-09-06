@@ -42,8 +42,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=20  # =LRCLK/WS, +1=BCK
     PICO_AUDIO_I2S_MCLK_PIN=22
     PICO_AUDIO_I2S_PIO=pio1
-    # ~46ms of audio queued ahead of the DAC. Lower for less delay.
-    PICO_AUDIO_I2S_NUM_BUFFERS=4
+    # ~35ms of audio queued ahead of the DAC. Lower for less delay, at the cost
+    # of less slack for a late run loop (which is heard as a dropout).
+    PICO_AUDIO_I2S_NUM_BUFFERS=3
     PICO_AUDIO_I2S_BUFFER_FRAMES=512
     # RUN_PIN=22
     CONN_PIN=26

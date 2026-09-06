@@ -6,8 +6,8 @@
  * Signal generation is exactly what pico-i2s-pio does in CLOCK_MODE_DEFAULT and
  * MODE_I2S - the same i2s_data and i2s_mclk programs, the same pin order and the
  * same clock dividers - so the DAC sees an identical bitstream. What differs is
- * how the PIO gets fed: a pair of chained DMA channels walks a ring of buffers,
- * and their completion IRQ reloads whichever one has just finished, on core0.
+ * how the PIO gets fed: a DMA channel cycles through a small ring of buffers and
+ * its completion IRQ hands over the next one, all on core0.
  *
  * pico-i2s-pio's own queue and i2s_dma_transfer_blocking() are not used. That
  * path needs a core spinning on the DMA registers, and on a Pico W that core
@@ -53,11 +53,11 @@
 #define PICO_AUDIO_I2S_PIO              pio1
 #endif
 
-// Audio queued ahead of the DAC. 4 x 512 frames is ~46ms at 44.1kHz, of which
-// one buffer is playing and one is loaded in the chained channel, so the run
-// loop has two to refill. Shrinking this cuts latency.
+// Audio queued ahead of the DAC, and the slack the run loop has to refill it.
+// 3 x 512 frames is ~35ms at 44.1kHz. Shrinking this cuts latency but leaves
+// less room for a late run loop, which comes out as a dropout.
 #ifndef PICO_AUDIO_I2S_NUM_BUFFERS
-#define PICO_AUDIO_I2S_NUM_BUFFERS      4
+#define PICO_AUDIO_I2S_NUM_BUFFERS      3
 #endif
 
 #ifndef PICO_AUDIO_I2S_BUFFER_FRAMES
@@ -78,25 +78,14 @@ static uint32_t sink_sample_rate;
 
 static uint i2s_sm;
 static uint i2s_mclk_sm;
-
-// Two channels chained to each other. When one finishes the other is started by
-// the hardware, so a late IRQ costs nothing until a whole buffer has played -
-// with a single channel the CPU had to re-arm it within the 8 word PIO FIFO,
-// about 90us at 44.1kHz, and anything slower than that punched a hole in the
-// output no matter how much audio was buffered behind it.
-static int i2s_dma_chan[2];
-static volatile int8_t chan_buffer[2] = { -1, -1 };   // -1 while playing silence
-
-static volatile uint32_t underrun_count;
+static int  i2s_dma_chan;
 
 // 32 bit stereo frames, interleaved left/right, as the PIO pulls them
 static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][BUFFER_WORDS];
 static int32_t silence_buffer[BUFFER_WORDS];
 
-// buffer_ready means "holds audio", and stays set for as long as the DMA is
-// reading it - it is cleared only once the transfer has finished. The run loop
-// refills anything not marked ready, so it can never write a buffer that is
-// queued or in flight, and the IRQ never picks one that is being written.
+// buffer_ready is set only by the run loop and cleared only by the DMA IRQ, so
+// a buffer is never written while the DMA is reading it
 static volatile bool    buffer_ready[PICO_AUDIO_I2S_NUM_BUFFERS];
 static volatile uint8_t next_buffer;
 
@@ -114,24 +103,14 @@ static void __time_critical_func(i2s_dma_handler)(void){
             buffer_ready[chan_buffer[c]] = false;
         }
 
-        // load the buffer that comes after the one now playing, ready for the
-        // chain to pick up. On underrun leave next_buffer alone so the queued
-        // buffers still play in order.
-        uint8_t i = next_buffer;
-        const int32_t * src;
-        if (buffer_ready[i]){
-            chan_buffer[c] = (int8_t) i;
-            src = audio_buffer[i];
-            if (++i == PICO_AUDIO_I2S_NUM_BUFFERS) i = 0;
-            next_buffer = i;
-        } else {
-            chan_buffer[c] = -1;
-            src = silence_buffer;
-            underrun_count++;
-        }
-
-        dma_channel_set_read_addr(i2s_dma_chan[c], src, false);
-        dma_channel_set_trans_count(i2s_dma_chan[c], BUFFER_WORDS, false);
+    // on underrun keep next_buffer where it is, so buffers still play in order
+    const int32_t * next = silence_buffer;
+    uint8_t i = next_buffer;
+    if (buffer_ready[i]){
+        next = audio_buffer[i];
+        buffer_ready[i] = false;
+        if (++i == PICO_AUDIO_I2S_NUM_BUFFERS) i = 0;
+        next_buffer = i;
     }
 }
 
