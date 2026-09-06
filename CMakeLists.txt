@@ -21,9 +21,12 @@ project(picow-a2dp CXX C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-add_executable(${PROJECT_NAME})
+# I2S sample queue: 48 kHz max (A2DP/SBC tops out there), 40 ms deep
+set(I2S_MAX_FREQ_KHZ 48)
+set(I2S_QUEUE_LEN 40)
+add_subdirectory(pico_i2s_pio)
 
-pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/i2s_out.pio)
+add_executable(${PROJECT_NAME})
 
 target_sources(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
@@ -35,9 +38,13 @@ target_sources(${PROJECT_NAME} PRIVATE
     src/avrcp.c
 )
 
+# Same wiring as usb_sound_card_hires: i2s_mclk_set_pin(18, 20, 22)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    PICO_AUDIO_I2S_DATA_PIN=9
-    PICO_AUDIO_I2S_CLOCK_PIN_BASE=10  # =BCK, +1=LRCLK
+    PICO_AUDIO_I2S_DATA_PIN=18        # DIN
+    PICO_AUDIO_I2S_CLOCK_PIN_BASE=20  # =LRCLK/WS, +1=BCK
+    PICO_AUDIO_I2S_MCLK_PIN=22
+    PICO_AUDIO_I2S_CLOCK_MODE=CLOCK_MODE_DEFAULT
+    PICO_AUDIO_I2S_FORMAT=MODE_I2S
     PICO_AUDIO_I2S_PIO=pio1
     # RUN_PIN=22
     CONN_PIN=26
@@ -49,8 +56,8 @@ target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     pico_stdio_usb  # use usb, not uart for stdio
     # pico_stdio_uart  # use uart, not usb for stdio e.g. via picoprobe
-    hardware_dma
-    hardware_pio
+    pico_multicore
+    pico-i2s-pio
     pico_btstack_sbc_decoder
     pico_btstack_classic
     pico_btstack_cyw43
