@@ -21,12 +21,9 @@ project(picow-a2dp CXX C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# I2S sample queue: 48 kHz max (A2DP/SBC tops out there), 40 ms deep
-set(I2S_MAX_FREQ_KHZ 48)
-set(I2S_QUEUE_LEN 40)
-add_subdirectory(pico_i2s_pio)
-
 add_executable(${PROJECT_NAME})
+
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/i2s_out.pio)
 
 target_sources(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
@@ -38,18 +35,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     src/avrcp.c
 )
 
-# I2S pinout. Note this differs from the pico-extras driver used previously:
-# LRCLK and BCK are swapped, and MCLK is new. A Pimoroni Pico Audio Pack has
-# DATA/BCK/LRCLK hard wired to GP9/GP10/GP11 and cannot be used as-is.
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-    PICO_AUDIO_I2S_DATA_PIN=9         # DIN
-    PICO_AUDIO_I2S_CLOCK_PIN_BASE=10  # =LRCLK/WS, +1=BCK
-    PICO_AUDIO_I2S_MCLK_PIN=12        # 22.5792 / 24.576 MHz
-    # CLOCK_MODE_LOW_JITTER drops the PIO fractional divider by re-running the
-    # system PLL. It also re-runs it on every sample rate change, which breaks
-    # the CYW43 PIO/SPI bus once Bluetooth is up, so it is off by default.
-    PICO_AUDIO_I2S_CLOCK_MODE=CLOCK_MODE_DEFAULT
-    PICO_AUDIO_I2S_FORMAT=MODE_I2S
+    PICO_AUDIO_I2S_DATA_PIN=9
+    PICO_AUDIO_I2S_CLOCK_PIN_BASE=10  # =BCK, +1=LRCLK
     PICO_AUDIO_I2S_PIO=pio1
     # RUN_PIN=22
     CONN_PIN=26
@@ -61,8 +49,8 @@ target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     pico_stdio_usb  # use usb, not uart for stdio
     # pico_stdio_uart  # use uart, not usb for stdio e.g. via picoprobe
-    pico_multicore
-    pico-i2s-pio
+    hardware_dma
+    hardware_pio
     pico_btstack_sbc_decoder
     pico_btstack_classic
     pico_btstack_cyw43
