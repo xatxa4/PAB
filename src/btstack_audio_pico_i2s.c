@@ -1,16 +1,18 @@
 /*
  * btstack_audio_pico_i2s.c
  *
- * Implementation of btstack_audio.h on top of pico-i2s-pio.
+ * Implementation of btstack_audio.h driving pico-i2s-pio's PIO programs.
  *
- * Wiring and I2S settings match usb_sound_card_hires, which is known to drive
- * the ES9038Q2M: 32 bit frames, BCLK = 64fs, MCLK on its own pin.
+ * Signal generation is exactly what pico-i2s-pio does in CLOCK_MODE_DEFAULT and
+ * MODE_I2S - the same i2s_data and i2s_mclk programs, the same pin order and the
+ * same clock dividers - so the DAC sees an identical bitstream. What differs is
+ * how the PIO gets fed: a DMA channel cycles through a small ring of buffers and
+ * its completion IRQ hands over the next one, all on core0.
  *
- * The BTstack run loop on core0 renders A2DP audio into the pico-i2s-pio sample
- * queue; core1 drains that queue into the PIO, because the library's DMA
- * handoff blocks. Core1 registers as a multicore lockout victim so BTstack can
- * still write link keys to flash - without that, flash_safe_execute() refuses
- * every write and pairings are never stored.
+ * pico-i2s-pio's own queue and i2s_dma_transfer_blocking() are not used. That
+ * path needs a core spinning on the DMA registers, and on a Pico W that core
+ * competes with the CYW43 bus for the same fabric and has to be parked whenever
+ * BTstack writes flash.
  */
 
 #define BTSTACK_FILE__ "btstack_audio_pico_i2s.c"
@@ -25,9 +27,11 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
-#include "pico/multicore.h"
+#include "hardware/clocks.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
 
-#include "i2s.h"
+#include "i2s.pio.h"
 
 #ifndef PICO_AUDIO_I2S_DATA_PIN
 #define PICO_AUDIO_I2S_DATA_PIN         18
@@ -48,122 +52,152 @@
 #define PICO_AUDIO_I2S_PIO              pio1
 #endif
 
-// CLOCK_MODE_DEFAULT keeps the system clock alone. usb_sound_card_hires uses
-// CLOCK_MODE_LOW_JITTER, but that re-runs the system PLL on every sample rate
-// change, which would break the CYW43 PIO/SPI bus once Bluetooth is up.
-#ifndef PICO_AUDIO_I2S_CLOCK_MODE
-#define PICO_AUDIO_I2S_CLOCK_MODE       CLOCK_MODE_DEFAULT
+// Audio queued ahead of the DAC, and the slack the run loop has to refill it.
+// 3 x 512 frames is ~35ms at 44.1kHz. Shrinking this cuts latency but leaves
+// less room for a late run loop, which comes out as a dropout.
+#ifndef PICO_AUDIO_I2S_NUM_BUFFERS
+#define PICO_AUDIO_I2S_NUM_BUFFERS      3
 #endif
 
-#ifndef PICO_AUDIO_I2S_FORMAT
-#define PICO_AUDIO_I2S_FORMAT           MODE_I2S
+#ifndef PICO_AUDIO_I2S_BUFFER_FRAMES
+#define PICO_AUDIO_I2S_BUFFER_FRAMES    512
 #endif
+
+#define BUFFER_WORDS              (PICO_AUDIO_I2S_BUFFER_FRAMES * 2)
 
 #define DRIVER_POLL_INTERVAL_MS   5
-
-// how much audio to keep queued ahead of the DAC
-#define TARGET_LATENCY_MS         20
-
-// frames rendered per playback_callback() call
-#define RENDER_FRAMES_MAX         128
-
-// frames per DMA transfer: 0.5ms at 48kHz, rounded up
-#define PUMP_FRAMES_MAX           32
 
 static void (*playback_callback)(int16_t * buffer, uint16_t num_frames);
 
 static btstack_timer_source_t driver_timer_sink;
 static bool     sink_active;
-static bool     i2s_running;
+static bool     i2s_started;
 static uint8_t  sink_channel_count;
-static uint32_t sink_sample_rate = 44100;
+static uint32_t sink_sample_rate;
 
-// touched only from the run loop on core0
-static int16_t render_pcm[RENDER_FRAMES_MAX * 2];
-static int32_t render_left[RENDER_FRAMES_MAX];
-static int32_t render_right[RENDER_FRAMES_MAX];
+static uint i2s_sm;
+static uint i2s_mclk_sm;
+static int  i2s_dma_chan;
 
-// touched only from core1
-static int32_t pump_dma_a[2][PUMP_FRAMES_MAX * 2];
-static int32_t pump_dma_b[2][PUMP_FRAMES_MAX * 2];
+// 32 bit stereo frames, interleaved left/right, as the PIO pulls them
+static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][BUFFER_WORDS];
+static int32_t silence_buffer[BUFFER_WORDS];
 
-static void i2s_pump_core1(void){
-    int32_t buf_l[PUMP_FRAMES_MAX];
-    int32_t buf_r[PUMP_FRAMES_MAX];
-    uint8_t page = 0;
-    bool    muted = true;
+// buffer_ready is set only by the run loop and cleared only by the DMA IRQ, so
+// a buffer is never written while the DMA is reading it
+static volatile bool    buffer_ready[PICO_AUDIO_I2S_NUM_BUFFERS];
+static volatile uint8_t next_buffer;
 
-    // let core0 park us while it writes flash, otherwise BTstack cannot store
-    // link keys and every connection has to be paired from scratch
-    multicore_lockout_victim_init();
+// scratch for the 16 bit samples coming out of the A2DP pipeline
+static int16_t render_pcm[PICO_AUDIO_I2S_BUFFER_FRAMES * 2];
 
-    while (true){
-        int chunk = (int) (i2s_get_sample_rate_hz() / 2000);
-        if (chunk > PUMP_FRAMES_MAX) chunk = PUMP_FRAMES_MAX;
+// writing the read address trigger alias also reloads the transfer count
+static void __time_critical_func(i2s_dma_handler)(void){
+    dma_hw->ints0 = 1u << i2s_dma_chan;
 
-        // wait for a small cushion before unmuting, so a slow start does not
-        // turn into a stutter of alternating audio and silence
-        int queued = i2s_get_queue_length();
-        if (muted){
-            if (queued >= chunk * 3) muted = false;
-        } else if (queued == 0){
-            muted = true;
-        }
-
-        int frames = 0;
-        if (!muted){
-            frames = i2s_dequeue(buf_l, buf_r, chunk);
-            if (frames < chunk) muted = true;
-        }
-
-        // pad with silence rather than shortening the transfer: MCLK/BCLK/LRCLK
-        // stay running between tracks and the DAC keeps its lock
-        memset(&buf_l[frames], 0, (chunk - frames) * sizeof(int32_t));
-        memset(&buf_r[frames], 0, (chunk - frames) * sizeof(int32_t));
-
-        int words = i2s_format_piodata(buf_l, buf_r, chunk,
-                                       (uint32_t *) pump_dma_a[page],
-                                       (uint32_t *) pump_dma_b[page]);
-        i2s_dma_transfer_blocking(pump_dma_a[page], pump_dma_b[page], words);
-        page ^= 1;
+    // on underrun keep next_buffer where it is, so buffers still play in order
+    const int32_t * next = silence_buffer;
+    uint8_t i = next_buffer;
+    if (buffer_ready[i]){
+        next = audio_buffer[i];
+        buffer_ready[i] = false;
+        if (++i == PICO_AUDIO_I2S_NUM_BUFFERS) i = 0;
+        next_buffer = i;
     }
+    dma_channel_set_read_addr(i2s_dma_chan, next, true);
 }
 
-static void i2s_begin(uint32_t sample_rate){
-    i2s_set_config(PICO_AUDIO_I2S_PIO, PICO_AUDIO_I2S_CLOCK_MODE, PICO_AUDIO_I2S_FORMAT);
-    i2s_set_pin(PICO_AUDIO_I2S_DATA_PIN, PICO_AUDIO_I2S_CLOCK_PIN_BASE, PICO_AUDIO_I2S_MCLK_PIN);
-    i2s_init(sample_rate);
+static void i2s_set_sample_rate(uint32_t sample_rate){
+    uint32_t sys = clock_get_hz(clk_sys);
 
-    multicore_launch_core1(i2s_pump_core1);
-    i2s_running = true;
+    // i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs
+    pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_sm, (float) sys / (float) (sample_rate * 128));
+
+    // MCLK is fixed at 22.5792 / 24.576 MHz; i2s_mclk halves its state machine clock
+    float mclk_sm_hz = (sample_rate % 48000 == 0) ? 49.152e6f : 45.1584e6f;
+    pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_mclk_sm, (float) sys / mclk_sm_hz);
+}
+
+static void i2s_start(uint32_t sample_rate){
+    PIO pio = PICO_AUDIO_I2S_PIO;
+
+    i2s_sm      = pio_claim_unused_sm(pio, true);
+    i2s_mclk_sm = pio_claim_unused_sm(pio, true);
+
+    pio_gpio_init(pio, PICO_AUDIO_I2S_DATA_PIN);
+    pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE);
+    pio_gpio_init(pio, PICO_AUDIO_I2S_CLOCK_PIN_BASE + 1);
+    pio_gpio_init(pio, PICO_AUDIO_I2S_MCLK_PIN);
+
+    pio_sm_set_consecutive_pindirs(pio, i2s_mclk_sm, PICO_AUDIO_I2S_MCLK_PIN, 1, true);
+    uint offset_mclk = pio_add_program(pio, &i2s_mclk_program);
+    pio_sm_config cm = i2s_mclk_program_get_default_config(offset_mclk);
+    sm_config_set_set_pins(&cm, PICO_AUDIO_I2S_MCLK_PIN, 1);
+    pio_sm_init(pio, i2s_mclk_sm, offset_mclk, &cm);
+    pio_sm_set_enabled(pio, i2s_mclk_sm, true);
+
+    uint offset = pio_add_program(pio, &i2s_data_program);
+    pio_sm_config c = i2s_data_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, PICO_AUDIO_I2S_DATA_PIN, 1);
+    sm_config_set_sideset_pins(&c, PICO_AUDIO_I2S_CLOCK_PIN_BASE);
+    sm_config_set_out_shift(&c, false, false, 32);   // shift left, MSB first
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    pio_sm_init(pio, i2s_sm, offset, &c);
+
+    uint32_t pin_mask = (1u << PICO_AUDIO_I2S_DATA_PIN) | (3u << PICO_AUDIO_I2S_CLOCK_PIN_BASE);
+    pio_sm_set_pindirs_with_mask(pio, i2s_sm, pin_mask, pin_mask);
+    pio_sm_exec(pio, i2s_sm, pio_encode_jmp(offset));
+    pio_sm_set_pins(pio, i2s_sm, 0);
+    pio_sm_clear_fifos(pio, i2s_sm);
+
+    i2s_set_sample_rate(sample_rate);
+
+    i2s_dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config dc = dma_channel_get_default_config(i2s_dma_chan);
+    channel_config_set_transfer_data_size(&dc, DMA_SIZE_32);
+    channel_config_set_read_increment(&dc, true);
+    channel_config_set_write_increment(&dc, false);
+    channel_config_set_dreq(&dc, pio_get_dreq(pio, i2s_sm, true));
+    dma_channel_configure(i2s_dma_chan, &dc, &pio->txf[i2s_sm],
+                          silence_buffer, BUFFER_WORDS, false);
+
+    dma_channel_set_irq0_enabled(i2s_dma_chan, true);
+    irq_add_shared_handler(DMA_IRQ_0, i2s_dma_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    irq_set_enabled(DMA_IRQ_0, true);
+
+    // clocks run from here on, feeding silence whenever nothing is streaming,
+    // so the DAC never has to re-acquire between tracks
+    pio_sm_set_enabled(pio, i2s_sm, true);
+    dma_channel_start(i2s_dma_chan);
 }
 
 static void btstack_audio_pico_sink_fill_buffers(void){
-    int target = (int) (sink_sample_rate / 1000 * TARGET_LATENCY_MS);
-    if (target > I2S_QUEUE_MAX - 1) target = I2S_QUEUE_MAX - 1;
+    // start at the buffer the IRQ wants next, so it is never left behind
+    uint8_t i = next_buffer;
 
-    while (true){
-        int frames = target - i2s_get_queue_length();
-        if (frames <= 0) break;
-        if (frames > RENDER_FRAMES_MAX) frames = RENDER_FRAMES_MAX;
+    for (uint8_t n = 0; n < PICO_AUDIO_I2S_NUM_BUFFERS;
+         n++, i = (i + 1 == PICO_AUDIO_I2S_NUM_BUFFERS) ? 0 : i + 1){
 
-        (*playback_callback)(render_pcm, frames);
+        if (buffer_ready[i]) continue;
+
+        (*playback_callback)(render_pcm, PICO_AUDIO_I2S_BUFFER_FRAMES);
 
         // 16 bit PCM sits in the top half of the 32 bit I2S frame; shift as
         // unsigned, negative operands make the signed shift undefined
+        int32_t * dst = audio_buffer[i];
         if (sink_channel_count == 1){
-            for (int i = 0; i < frames; i++){
-                render_left[i]  = (int32_t) ((uint32_t) render_pcm[i] << 16);
-                render_right[i] = render_left[i];
+            for (int f = 0; f < PICO_AUDIO_I2S_BUFFER_FRAMES; f++){
+                int32_t sample = (int32_t) ((uint32_t) render_pcm[f] << 16);
+                dst[2 * f    ] = sample;
+                dst[2 * f + 1] = sample;
             }
         } else {
-            for (int i = 0; i < frames; i++){
-                render_left[i]  = (int32_t) ((uint32_t) render_pcm[2 * i    ] << 16);
-                render_right[i] = (int32_t) ((uint32_t) render_pcm[2 * i + 1] << 16);
+            for (int w = 0; w < BUFFER_WORDS; w++){
+                dst[w] = (int32_t) ((uint32_t) render_pcm[w] << 16);
             }
         }
 
-        if (!i2s_enqueue(render_left, render_right, frames)) break;
+        buffer_ready[i] = true;
     }
 }
 
@@ -186,12 +220,13 @@ static int btstack_audio_pico_sink_init(
     playback_callback  = playback;
     sink_channel_count = channels;
 
-    if (!i2s_running){
+    if (!i2s_started){
+        i2s_start(samplerate);
         sink_sample_rate = samplerate;
-        i2s_begin(samplerate);
+        i2s_started = true;
     } else if (samplerate != sink_sample_rate){
+        i2s_set_sample_rate(samplerate);
         sink_sample_rate = samplerate;
-        i2s_change_clock(samplerate);
     }
 
     return 0;
@@ -206,7 +241,6 @@ static void btstack_audio_pico_sink_start_stream(void){
 
     sink_active = true;
 
-    // pre-fill the I2S queue
     btstack_audio_pico_sink_fill_buffers();
 
     btstack_run_loop_set_timer_handler(&driver_timer_sink, &driver_timer_handler_sink);
@@ -219,7 +253,7 @@ static void btstack_audio_pico_sink_stop_stream(void){
     btstack_run_loop_remove_timer(&driver_timer_sink);
     sink_active = false;
 
-    // core1 drains what is left and falls back to silence, keeping the clocks up
+    // the DMA drains what is queued and falls back to silence on its own
 }
 
 static void btstack_audio_pico_sink_close(void){

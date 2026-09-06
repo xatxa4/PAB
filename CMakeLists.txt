@@ -21,12 +21,10 @@ project(picow-a2dp CXX C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# I2S sample queue: 48 kHz max (A2DP/SBC tops out there), 40 ms deep
-set(I2S_MAX_FREQ_KHZ 48)
-set(I2S_QUEUE_LEN 40)
-add_subdirectory(pico_i2s_pio)
-
 add_executable(${PROJECT_NAME})
+
+# only the PIO programs are used from pico_i2s_pio, not its queue/DMA layer
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/pico_i2s_pio/i2s.pio)
 
 target_sources(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
@@ -43,9 +41,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     PICO_AUDIO_I2S_DATA_PIN=18        # DIN
     PICO_AUDIO_I2S_CLOCK_PIN_BASE=20  # =LRCLK/WS, +1=BCK
     PICO_AUDIO_I2S_MCLK_PIN=22
-    PICO_AUDIO_I2S_CLOCK_MODE=CLOCK_MODE_DEFAULT
-    PICO_AUDIO_I2S_FORMAT=MODE_I2S
     PICO_AUDIO_I2S_PIO=pio1
+    # ~35ms of audio queued ahead of the DAC. Lower for less delay, at the cost
+    # of less slack for a late run loop (which is heard as a dropout).
+    PICO_AUDIO_I2S_NUM_BUFFERS=3
+    PICO_AUDIO_I2S_BUFFER_FRAMES=512
     # RUN_PIN=22
     CONN_PIN=26
     BT_PIN="0000"
@@ -56,8 +56,9 @@ target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     pico_stdio_usb  # use usb, not uart for stdio
     # pico_stdio_uart  # use uart, not usb for stdio e.g. via picoprobe
-    pico_multicore
-    pico-i2s-pio
+    hardware_clocks
+    hardware_dma
+    hardware_pio
     pico_btstack_sbc_decoder
     pico_btstack_classic
     pico_btstack_cyw43

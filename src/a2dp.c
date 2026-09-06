@@ -12,11 +12,12 @@
 #include "btstack_audio_pico_i2s.h"
 
 
-// joba-1's values. Dropping these to 20/40/10 leaves the SBC buffer too shallow
-// to ride out the gaps between media packets.
-#define OPTIMAL_FRAMES_MIN 60
-#define OPTIMAL_FRAMES_MAX 120
-#define ADDITIONAL_FRAMES  30
+// Dominates end to end latency: each SBC frame is 128 samples, so 20..40 frames
+// is ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts
+// lip sync out by a third of a second.
+#define OPTIMAL_FRAMES_MIN 20
+#define OPTIMAL_FRAMES_MAX 40
+#define ADDITIONAL_FRAMES  10
 #define NUM_CHANNELS       2
 #define BYTES_PER_FRAME    (2*NUM_CHANNELS)
 #define MAX_SBC_FRAME_SIZE 120
