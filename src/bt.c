@@ -64,7 +64,10 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
     gap_set_local_name(_name);
     gap_discoverable_control(1); 
     gap_set_class_of_device(0x200414);  // Service Class: Audio, Major Device Class: Audio, Minor: Loudspeaker
-    gap_set_default_link_policy_settings( LM_LINK_POLICY_ENABLE_ROLE_SWITCH | LM_LINK_POLICY_ENABLE_SNIFF_MODE );
+    // Role switch stays on so a phone can become master after re-connect. Sniff
+    // does not: it lets the source park the link mid stream, and the power it
+    // saves is irrelevant to a mains powered speaker.
+    gap_set_default_link_policy_settings( LM_LINK_POLICY_ENABLE_ROLE_SWITCH );
     gap_set_allow_role_switch(true);  // A2DP Source, e.g. smartphone, can become master after re-connect.
 
     _hci_registration.callback = &packet_handler;

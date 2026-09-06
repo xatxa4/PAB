@@ -111,7 +111,7 @@ static void playback_handler(int16_t * buffer, uint16_t num_audio_frames) {
     // first fill from resampled audio
     uint32_t bytes_read;
     btstack_ring_buffer_read(&_decoded_audio_ring_buffer, (uint8_t *) buffer, num_audio_frames * BYTES_PER_FRAME, &bytes_read);
-    buffer += bytes_read / NUM_CHANNELS;
+    buffer += bytes_read / sizeof(int16_t);
     num_audio_frames -= bytes_read / BYTES_PER_FRAME;
 
     // then start decoding sbc frames using request_* globals
@@ -257,6 +257,10 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             gpio_put(CONN_PIN, 1);
 
+            // inquiry scan keeps interrupting the ACL link on its own 1.28s
+            // cycle, and nobody needs to discover a speaker that is in use
+            gap_discoverable_control(0);
+
             // printf("A2DP  Sink      : Streaming connection is established, address %s, cid 0x%02x, local seid %d\n",
             //        bd_addr_to_str(_a2dp->addr), _a2dp->a2dp_cid, _a2dp->a2dp_local_seid);
             break;
@@ -282,6 +286,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // printf("A2DP  Sink      : Stream released\n");
             _stream_state = STREAM_STATE_CLOSED;
             media_processing_close();
+            gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             gpio_put(CONN_PIN, 0);
             watchdog_enable(100, true);  // reboot in 0.1s, since reconnect is buggy
@@ -379,6 +384,7 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     uint8_t *packet_begin = packet + pos;
 
     // store sbc frame size for buffer management
+    if (sbc_header.num_frames == 0) return;
     _sbc_frame_size = packet_length / sbc_header.num_frames;
     int status = btstack_ring_buffer_write(&_sbc_frame_ring_buffer, packet_begin, packet_length);
     // if (status != ERROR_CODE_SUCCESS){
