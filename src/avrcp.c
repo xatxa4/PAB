@@ -1,9 +1,15 @@
 #include "avrcp.h"
 
+#include <stdio.h>
+
 
 static uint16_t _cid = 0;
 static bool _playing = false;
-static uint8_t _volume = 0;
+
+// Full scale until the source says otherwise. A source that does not use AVRCP
+// absolute volume attenuates the stream itself, and starting at 0 would put
+// that on top of a fixed -42dB here.
+static uint8_t _volume = 127;
 
 
 static void avrcp_volume_changed(uint8_t volume){
@@ -41,6 +47,10 @@ static void connection_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             avrcp_target_support_event(cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
             avrcp_target_support_event(cid, AVRCP_NOTIFICATION_EVENT_BATT_STATUS_CHANGED);
             avrcp_target_battery_status_changed(cid, AVRCP_BATTERY_STATUS_EXTERNAL);
+
+            // tell the source where we actually start, otherwise it reads back
+            // the 0 btstack defaults to and its slider never matches ours
+            avrcp_target_volume_changed(cid, _volume);
         
             // query supported events:
             avrcp_controller_get_supported_events(cid);
@@ -117,8 +127,8 @@ static void target_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     switch (packet[2]){
         case AVRCP_SUBEVENT_NOTIFICATION_VOLUME_CHANGED:
             _volume = avrcp_subevent_notification_volume_changed_get_absolute_volume(packet);
-            // volume_percentage = volume * 100 / 127;
-            // printf("AVRCP Target    : Volume set to %d%% (%d)\n", volume_percentage, volume);
+            // fires once per slider move, so it is not in a hot path
+            printf("AVRCP Target    : Volume set to %d%% (%d)\n", _volume * 100 / 127, _volume);
             avrcp_volume_changed(_volume);
             break;
         
