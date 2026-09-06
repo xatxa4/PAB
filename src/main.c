@@ -2,7 +2,9 @@
 #include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
 
+#include "app_mode.h"
 #include "bt.h"
+#include "usb_dac.h"
 
 
 // Unrecoverable error happened. Reboot by setting watchdog.
@@ -36,14 +38,11 @@ void on_bt_up( void * ) {
 }
 
 
-int main() {
-    stdio_init_all();
-
+static void bt_sink_run(void) {
     // initialize CYW43 driver architecture (will enable BT if/because CYW43_ENABLE_BLUETOOTH == 1)
     if (cyw43_arch_init()) {
         printf("Failed to init cyw43_arch\n");
         fatal();
-        return -1;
     }
 
     // led on during setup until bt is up
@@ -53,6 +52,24 @@ int main() {
 
     printf("Setup done\n");
     bt_run();
+}
+
+
+int main() {
+    stdio_init_all();
+
+    app_mode_t mode = app_mode_current();
+    printf("MODE            : %s\n", app_mode_name(mode));
+
+    switch (mode) {
+        case APP_MODE_USB_DAC:
+            usb_dac_run();
+            break;
+        case APP_MODE_BT_SINK:
+        default:
+            bt_sink_run();
+            break;
+    }
 
     fatal();
     return -2;

@@ -28,7 +28,10 @@ pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/pico_i2s_pio/
 
 target_sources(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
+    src/audio_out.c
+    src/app_mode.c
     src/btstack_audio_pico_i2s.c
+    src/usb_dac.c
     src/main.c
     src/bt.c
     src/sdp.c
@@ -67,7 +70,9 @@ target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     hardware_clocks
     hardware_dma
+    hardware_flash
     hardware_pio
+    pico_flash
     pico_btstack_sbc_decoder
     pico_btstack_classic
     pico_btstack_cyw43
