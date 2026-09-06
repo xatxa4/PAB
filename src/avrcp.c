@@ -11,6 +11,9 @@ static bool _playing = false;
 // that on top of a fixed -42dB here.
 static uint8_t _volume = 127;
 
+// ~16 presses to cross the full range
+#define VOLUME_STEP 8
+
 
 static void avrcp_volume_changed(uint8_t volume){
     const btstack_audio_sink_t * audio = btstack_audio_sink_get_instance();
@@ -132,20 +135,33 @@ static void target_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             avrcp_volume_changed(_volume);
             break;
         
-        // case AVRCP_SUBEVENT_OPERATION:
-        //     auto operation_id = avrcp_subevent_operation_get_operation_id(packet);
-        //     auto button_state = avrcp_subevent_operation_get_button_pressed(packet) > 0 ? "PRESS" : "RELEASE";
-        //     switch (operation_id){
-        //         case AVRCP_OPERATION_ID_VOLUME_UP:
-        //             printf("AVRCP Target    : VOLUME UP (%s)\n", button_state);
-        //             break;
-        //         case AVRCP_OPERATION_ID_VOLUME_DOWN:
-        //             printf("AVRCP Target    : VOLUME DOWN (%s)\n", button_state);
-        //             break;
-        //         default:
-        //             return;
-        //     }
-        //     break;
+        // Sources that do not use absolute volume send category 2 button
+        // presses instead, and expect us to keep the volume ourselves.
+        case AVRCP_SUBEVENT_OPERATION: {
+            if (!avrcp_subevent_operation_get_button_pressed(packet)) break;  // ignore the release
+
+            int step;
+            switch (avrcp_subevent_operation_get_operation_id(packet)){
+                case AVRCP_OPERATION_ID_VOLUME_UP:
+                    step = VOLUME_STEP;
+                    break;
+                case AVRCP_OPERATION_ID_VOLUME_DOWN:
+                    step = -VOLUME_STEP;
+                    break;
+                default:
+                    return;
+            }
+
+            int volume = _volume + step;
+            if (volume < 0) volume = 0;
+            if (volume > 127) volume = 127;
+            _volume = (uint8_t) volume;
+
+            printf("AVRCP Target    : Volume stepped to %d%% (%d)\n", _volume * 100 / 127, _volume);
+            avrcp_target_volume_changed(avrcp_subevent_operation_get_avrcp_cid(packet), _volume);
+            avrcp_volume_changed(_volume);
+            break;
+        }
 
         default:
             // printf("AVRCP Target    : Event 0x%02x is not parsed\n", packet[2]);
