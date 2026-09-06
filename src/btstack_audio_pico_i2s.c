@@ -83,10 +83,13 @@ static int  i2s_dma_chan;
 static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][BUFFER_WORDS];
 static int32_t silence_buffer[BUFFER_WORDS];
 
-// buffer_ready is set only by the run loop and cleared only by the DMA IRQ, so
-// a buffer is never written while the DMA is reading it
+// buffer_ready means "holds audio", and stays set for as long as the DMA is
+// reading it - it is cleared only once the transfer has finished. The run loop
+// refills anything not marked ready, so it can never write a buffer that is
+// queued or in flight, and the IRQ never picks one that is being written.
 static volatile bool    buffer_ready[PICO_AUDIO_I2S_NUM_BUFFERS];
 static volatile uint8_t next_buffer;
+static volatile int8_t  playing_buffer = -1;    // -1 while playing silence
 
 // scratch for the 16 bit samples coming out of the A2DP pipeline
 static int16_t render_pcm[PICO_AUDIO_I2S_BUFFER_FRAMES * 2];
@@ -95,16 +98,22 @@ static int16_t render_pcm[PICO_AUDIO_I2S_BUFFER_FRAMES * 2];
 static void __time_critical_func(i2s_dma_handler)(void){
     dma_hw->ints0 = 1u << i2s_dma_chan;
 
+    // the transfer that just ended is the only moment a buffer becomes free
+    if (playing_buffer >= 0){
+        buffer_ready[playing_buffer] = false;
+    }
+
     // on underrun keep next_buffer where it is, so buffers still play in order
-    const int32_t * next = silence_buffer;
     uint8_t i = next_buffer;
     if (buffer_ready[i]){
-        next = audio_buffer[i];
-        buffer_ready[i] = false;
+        playing_buffer = (int8_t) i;
         if (++i == PICO_AUDIO_I2S_NUM_BUFFERS) i = 0;
         next_buffer = i;
+        dma_channel_set_read_addr(i2s_dma_chan, audio_buffer[playing_buffer], true);
+    } else {
+        playing_buffer = -1;
+        dma_channel_set_read_addr(i2s_dma_chan, silence_buffer, true);
     }
-    dma_channel_set_read_addr(i2s_dma_chan, next, true);
 }
 
 static void i2s_set_sample_rate(uint32_t sample_rate){
