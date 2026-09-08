@@ -1,4 +1,33 @@
 /*
+ * Copyright (c) 2025 BambooMaster <https://github.com/BambooMaster/pico-i2s-pio>
+ * Copyright (c) 2026 xatxa4 <https://github.com/xatxa4/PAB>
+ *
+ * PIO setup, clock dividers and pin mapping follow BambooMaster's
+ * pico-i2s-pio i2s_core.c; the state machine programs are its i2s.pio. The
+ * chained DMA and buffer handling are new.
+ *
+ * SPDX-License-Identifier: MIT
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+/*
  * audio_out.c - 32 bit I2S output, no knowledge of what produces the audio.
  *
  * Signal generation is what pico-i2s-pio does in CLOCK_MODE_DEFAULT and
