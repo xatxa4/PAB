@@ -216,9 +216,55 @@ reboot. With four personalities, a fault handler that records where it died in a
 scratch register and reboots into the last-known-good mode is worth more than
 any single feature.
 
-Two interactions to respect: the watchdog must be fed across the BOOTSEL blink
-(~1.8 s of blocking in `mode_button.c`), and the fault handler must not clobber
-`watchdog_hw->scratch[0]`, which carries the mode.
+Three interactions to respect: the watchdog must be fed across the BOOTSEL blink
+(~1.8 s of blocking in `mode_button.c`); the fault handler must not clobber
+`watchdog_hw->scratch[0]`, which carries the mode; and **once there is an I2C
+bus, every transfer needs a timeout**. A slave holding SDA low makes
+`i2c_write_blocking()` hang forever, which under a watchdog is a reboot loop
+rather than a hang. Use `i2c_write_timeout_us()` (`hardware_i2c/i2c.h:280`)
+throughout — there is no reason to ever call the blocking form.
+
+### 1.6 A display on the audio thread is a dropout
+
+Not previously in this list, and the biggest thing the OLED brings. A 128&times;64
+SSD1306 full-frame update is 1024 bytes of GDDRAM plus address and control —
+about 1026 bytes, and every I2C byte costs 9 bit periods with its ACK:
+
+| Transfer | 400 kHz | 1 MHz (FM+) |
+|---|---|---|
+| Full frame (1026 B) | 23.1 ms | 9.2 ms |
+| One page (130 B) | 2.9 ms | 1.2 ms |
+
+Against the audio ring, which is `4 × 512` frames:
+
+| Sample rate | Ring depth | Full frame at 400 kHz |
+|---|---|---|
+| 44 100 Hz | 46.4 ms | eats half the ring in one call |
+| 48 000 Hz | 42.7 ms | eats half the ring |
+| 96 000 Hz | 21.3 ms | **exceeds the whole ring** |
+
+So one `i2c_write_blocking()` of a full frame from the run loop stalls
+`audio_out_service()` *and* BTstack for 23 ms. At 44.1 kHz it survives on the
+ring's margin; at 96 kHz it cannot. It also makes 0.2 more likely — 23 ms of
+blocked run loop is 23 ms of A2DP packets arriving into a ring nobody is
+draining, and that overflow is currently silent.
+
+**Three things, and none of them is exotic:**
+
+- **DMA the transfer.** `i2c_get_dreq()` (`hardware_i2c/i2c.h:458`) exists; the
+  CPU then blocks for none of it. Put the completion on `DMA_IRQ_1` or poll it —
+  *not* `DMA_IRQ_0`, which 1.4 raises to `PICO_HIGHEST_IRQ_PRIORITY` for audio.
+- **Update one page per tick.** The SSD1306's 8 pages of 128 bytes mean a whole
+  frame spreads over 8 service ticks — 40 ms, imperceptible for a UI.
+- **Only redraw what changed.** A volume readout is a dozen bytes, not 1024.
+
+Run the bus at 1 MHz while you are at it; the RP2040 supports Fast-mode Plus and
+`i2c_init()` returns the baud it actually achieved.
+
+*Rocks:* this is the same rule as 1.2 in a different costume — anything that
+blocks the loop must be measured against the ring in **time**, and the ring
+shrinks as the rate rises. Whatever you do here should be sized against the
+worst rate the box will ever run, not 44.1 kHz.
 
 ---
 
@@ -240,7 +286,13 @@ CLOCKS_SLEEP_EN0/1_RESET = 0xffffffff     // takes over when all cores sleep
 Everything is on: `CLK_ADC_ADC`, `CLK_SYS_ADC`, `CLK_RTC_RTC`, `CLK_SYS_RTC`,
 `CLK_SYS_I2C0/1`, `CLK_SYS_SPI0/1`, `CLK_PERI_SPI0/1`, `CLK_SYS_PWM`,
 `CLK_SYS_JTAG`, `CLK_SYS_UART0/1`, `CLK_PERI_UART0/1`, `CLK_SYS_USBCTRL`,
-`CLK_USB_USBCTRL`. The Bluetooth sink uses none of them.
+`CLK_USB_USBCTRL`. The Bluetooth sink uses none of them **today**.
+
+> **The I2C display and encoder change this.** `CLK_SYS_I2C0` moves to the keep
+> list the moment the OLED lands, and 2.2 must leave I2C0 out of reset. This is
+> Rock 3 landing within a day of the list being written, which is the argument
+> for 1.1 rather than against gating: as a descriptor row it is one line, as a
+> global `#define` it is a silent dead bus.
 
 `SLEEP_EN` is live for us because core1 is parked in the bootrom's WFE loop and
 therefore counts as asleep, and the run loop genuinely reaches `__wfe`
@@ -300,6 +352,17 @@ not set it once at init and forget — that is rock number two.
 Unused pins are already held by their pull-downs, so there is no shoot-through
 to fix there.
 
+Two scope rules, both of which an I2C bus and a rotary encoder would otherwise
+break:
+
+- **`gpio_set_input_enabled(pin, false)` applies to the I2S output pins only.**
+  I2C is bidirectional — the driver reads SDA back for the ACK — and encoder
+  pins are inputs. Disabling their input buffers kills both silently.
+- **Order matters.** `gpio_set_function()` sets `IE=1` and clears `OD`
+  (`hardware_gpio/gpio.c:42-45`), so pad tweaks applied *before* `i2c_init()`
+  are wiped, and applied *after* on I2C pins they break the bus. Touch pads only
+  after the pin's own init, and only for pins you own.
+
 ### 2.5 Dynamic / hybrid `clk_sys` scaling — **defer, and here is why**
 
 Technically possible, and the mechanism is clean: switch `clk_sys` between the
@@ -312,7 +375,9 @@ tens of µs — audible). `CYW43_PIO_CLOCK_DIV_DYNAMIC` and
 **But this is the item that most directly violates the brief.** On RP2040 the
 PIO block has no clock mux — it runs from `clk_sys`, full stop. So `clk_sys` is
 shared by the I2S output, the CYW43 bus, and *every future PIO-based source*: a
-S/PDIF receiver's recovery PIO, a USB feedback path's timing. Making `clk_sys`
+S/PDIF receiver's recovery PIO, a USB feedback path's timing. **And I2C** —
+"I2C is a synchronous design that runs from clk_sys" (`hardware_i2c/i2c.c:64`),
+so the display's baud rate moves with it too. Three subsystems, not two. Making `clk_sys`
 mutable means every one of those has to re-derive its dividers correctly, at the
 right moment, forever. It converts a constant into an invariant that four
 subsystems must jointly maintain.
@@ -385,6 +450,8 @@ nothing to do. Those are not our numbers.
 5. **1.1** — the mode descriptor. Nothing in Tier 2 lands safely before this.
 6. **1.5** — fault handler and watchdog, once the descriptor exists to say what
    a safe mode is.
+6b. **1.6** — before the display draws anything real, not after it starts
+   glitching the audio.
 7. **Measure** (both numbers).
 8. **2.1**, then **2.2**, **2.3**, **2.4** — each behind its own flag, so board
    current can be bisected against them one at a time.
