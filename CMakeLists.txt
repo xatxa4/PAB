@@ -31,6 +31,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     src/audio_out.c
     src/app_mode.c
     src/btstack_audio_pico_i2s.c
+    src/mode_button.c
     src/usb_dac.c
     src/main.c
     src/bt.c

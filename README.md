@@ -17,6 +17,28 @@ radio, S/PDIF receiver); only the Bluetooth sink is implemented today.
 | MCLK | — | off by default, see `CMakeLists.txt` |
 | Connection indicator | GP26 | high while a stream is established |
 
+## Modes
+
+The box has two personalities: the Bluetooth sink, and a USB sound card that is
+scaffolding only so far. **Hold BOOTSEL for about a fifth of a second to switch
+to the next one.** The onboard LED flashes three times slowly, and the Pico
+reboots into the new mode.
+
+The mode is put in a watchdog scratch register, which survives the reset, and
+written to flash so a cold start comes back the same way. Flash is only touched
+when the mode actually changes.
+
+Two things worth knowing:
+
+- After the three slow flashes, the LED blinks quickly until you let go of
+  BOOTSEL. That wait is deliberate: the bootrom reads the same button after the
+  reset, so rebooting while it is still held would bring the Pico up as a USB
+  drive instead of in the new mode. Held for more than five seconds, it reboots
+  anyway — and if you are still on the button at that point, the bootloader is
+  probably what you wanted.
+- The LED lives on the radio chip, so it only lights in Bluetooth mode. USB
+  sound card mode never brings the radio up, and switching out of it is silent.
+
 ## Build
 
 ```sh
@@ -41,7 +63,7 @@ advice; if you intend to sell a product based on this, take proper counsel.
 |---|---|---|
 | `src/a2dp.c`, `avrcp.c`, `bt.c`, `sdp.c`, `main.c`, `btstack_audio_pico_i2s.*` | BlueKitchen GmbH; joba-1; xatxa4 | BlueKitchen BTstack licence (BSD-3-Clause **plus a non-commercial clause**) |
 | `src/audio_out.c` | BambooMaster; xatxa4 | MIT |
-| `src/audio_out.h`, `app_mode.*`, `usb_dac.*` | xatxa4 | MIT |
+| `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.*` | xatxa4 | MIT |
 | `pico_i2s_pio/` (vendored, incl. `i2s.pio`) | BambooMaster | MIT — see `pico_i2s_pio/LICENSE` |
 | Raspberry Pi Pico SDK (linked) | Raspberry Pi (Trading) Ltd. | BSD-3-Clause |
 | BTstack (linked, via the Pico SDK) | BlueKitchen GmbH | BlueKitchen BTstack licence |
@@ -63,13 +85,15 @@ summary.
   mapping and the clock divider scheme that make 32-bit I2S with MCLK work on
   the RP2040; and `usb_sound_card_hires`, which established the working DAC
   configuration. <https://github.com/BambooMaster/pico-i2s-pio>
-- **Raspberry Pi (Trading) Ltd.** — the Pico SDK, and `pico-extras`'
-  `audio_i2s`, whose DMA-and-IRQ structure the output stage follows.
+- **Raspberry Pi (Trading) Ltd.** — the Pico SDK; `pico-extras`' `audio_i2s`,
+  whose DMA-and-IRQ structure the output stage follows; and the
+  `picoboard/button` example from `pico-examples`, which is how `mode_button.c`
+  reads BOOTSEL at runtime.
 
 ## What this means in practice
 
-The original work in this project (`audio_out.h`, `app_mode.*`, `usb_dac.*`, and
-this project's own changes throughout) is offered under the **MIT Licence** —
+The original work in this project (`audio_out.h`, `app_mode.*`, `mode_button.*`,
+`usb_dac.*`, and this project's own changes throughout) is offered under the **MIT Licence** —
 the most permissive of the licences involved. See `LICENSE`.
 
 That permission applies only to this project's own contributions. It cannot and

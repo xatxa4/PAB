@@ -110,9 +110,13 @@ void app_mode_switch_to(app_mode_t mode){
     while (true) tight_loop_contents();
 }
 
+app_mode_t app_mode_next(void){
+    return (app_mode_t) ((app_mode_current() + 1) % APP_MODE_COUNT);
+}
+
+
 void app_mode_switch_next(void){
-    app_mode_t next = (app_mode_t) ((app_mode_current() + 1) % APP_MODE_COUNT);
-    app_mode_switch_to(next);
+    app_mode_switch_to(app_mode_next());
 }
 
 const char * app_mode_name(app_mode_t mode){

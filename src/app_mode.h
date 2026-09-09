@@ -52,6 +52,9 @@ typedef enum {
 /// APP_MODE_BT_SINK. Safe to call more than once.
 app_mode_t app_mode_current(void);
 
+/// The mode a single button press moves to: the next one in the cycle.
+app_mode_t app_mode_next(void);
+
 /// Persist mode if it differs from what is stored, then reboot into it.
 /// Does not return.
 void app_mode_switch_to(app_mode_t mode);

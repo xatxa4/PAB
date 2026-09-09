@@ -51,6 +51,7 @@
 
 #include "audio_out.h"
 #include "app_mode.h"
+#include "mode_button.h"
 
 #define USB_DAC_SAMPLE_RATE  48000
 
@@ -63,6 +64,7 @@ void usb_dac_run(void){
 
     while (true){
         audio_out_service();    // no fill callback registered: plays silence
+        mode_button_poll();     // rate limits itself, so 5ms here is fine
         sleep_ms(5);
     }
 }

@@ -46,6 +46,7 @@
 
 #include "app_mode.h"
 #include "bt.h"
+#include "mode_button.h"
 #include "usb_dac.h"
 
 
@@ -91,6 +92,10 @@ static void bt_sink_run(void) {
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
 
     bt_begin(BT_NAME, BT_PIN, on_bt_up, NULL);
+
+    // BTstack owns the loop from here on, so the mode button rides along on a
+    // run loop timer rather than being polled by us.
+    mode_button_start();
 
     printf("Setup done\n");
     bt_run();
