@@ -108,11 +108,19 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PAB_GENERATED_DIR}      # pab_version.h
 )
 
+# Both drivers set explicitly: pico_stdlib enables stdio UART for every target
+# unless told otherwise, so linking only the one we want left UART on in all
+# three builds - including "none".
 if (PAB_STDIO STREQUAL "usb")
-    target_link_libraries(${PROJECT_NAME} pico_stdio_usb)
+    pico_enable_stdio_usb(${PROJECT_NAME} 1)
+    pico_enable_stdio_uart(${PROJECT_NAME} 0)
 elseif (PAB_STDIO STREQUAL "uart")
-    target_link_libraries(${PROJECT_NAME} pico_stdio_uart)
-elseif (NOT PAB_STDIO STREQUAL "none")
+    pico_enable_stdio_usb(${PROJECT_NAME} 0)
+    pico_enable_stdio_uart(${PROJECT_NAME} 1)
+elseif (PAB_STDIO STREQUAL "none")
+    pico_enable_stdio_usb(${PROJECT_NAME} 0)
+    pico_enable_stdio_uart(${PROJECT_NAME} 0)
+else()
     message(FATAL_ERROR "PAB_STDIO must be usb, uart or none (got '${PAB_STDIO}')")
 endif()
 message(STATUS "PAB stdio: ${PAB_STDIO}")
