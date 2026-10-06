@@ -27,6 +27,7 @@
 #ifndef AUDIO_OUT_H
 #define AUDIO_OUT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -51,10 +52,26 @@ typedef void (*audio_out_fill_fn)(int32_t * dst, uint32_t num_frames, void * con
 
 /// Claims the PIO state machines and DMA channels and starts the clocks. From
 /// here on the DAC is fed continuously, silence included, so it never has to
-/// re-acquire. Idempotent.
-void audio_out_init(uint32_t sample_rate);
+/// re-acquire. Idempotent: once running, sample_rate is ignored and
+/// audio_out_set_sample_rate() is the way to change it. False, claiming
+/// nothing, if clk_sys cannot be divided down to sample_rate.
+bool audio_out_init(uint32_t sample_rate);
 
-void audio_out_set_sample_rate(uint32_t sample_rate);
+/// Reprograms the clocks for a new rate. Only between streams - the contract
+/// is audio_out_stop(), then this, then audio_out_start() - because audio
+/// already handed over was made for the old rate. Whatever is still queued is
+/// discarded; up to two buffers already loaded into the DMA play out at the
+/// new rate.
+///
+/// The PIO divider is 16.8 fixed point, so the achieved rate is close to, not
+/// exactly, the one asked for; it is printed with its error in ppm. True
+/// without touching anything if the rate is already the current one. False,
+/// changing nothing, if a stream is running, audio_out_init() has not run, or
+/// the divider is out of range.
+bool audio_out_set_sample_rate(uint32_t sample_rate);
+
+/// The rate last programmed, 0 before audio_out_init().
+uint32_t audio_out_sample_rate(void);
 
 /// 0 .. AUDIO_OUT_UNITY_GAIN. Applied to the 32 bit frames, so attenuating
 /// does not cost resolution the way scaling 16 bit samples first would.

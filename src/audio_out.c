@@ -41,12 +41,14 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
 #include "hardware/structs/bus_ctrl.h"   // the name SDK 1.5 and 2.x share
 
 #include "i2s.pio.h"
@@ -93,6 +95,7 @@
 static audio_out_fill_fn fill_callback;
 static void *            fill_context;
 static bool              i2s_started;
+static uint32_t          current_rate;
 
 static uint i2s_sm;
 #if I2S_HAVE_MCLK
@@ -154,20 +157,68 @@ static void __time_critical_func(i2s_dma_handler)(void){
     }
 }
 
-void audio_out_set_sample_rate(uint32_t sample_rate){
+// i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs and
+// the divider is clk_sys / (128 * rate). The PIO takes it in 16.8 fixed point,
+// which in 1/256ths is 2 * clk_sys / rate. Rounded to nearest: the float
+// pio_sm_set_clkdiv() truncates, which put 44.1kHz at +165ppm instead of -12.
+// Returns 0 if the divider is out of range - below 1, or past the 16 bit
+// integer part.
+static uint32_t data_clkdiv_fp8(uint32_t sample_rate){
+    if (sample_rate == 0) return 0;
+    uint64_t div = (2ull * clock_get_hz(clk_sys) + sample_rate / 2) / sample_rate;
+    return (div >= 0x100 && div <= 0xffffff) ? (uint32_t) div : 0;
+}
+
+static void program_sample_rate(uint32_t sample_rate, uint32_t div_fp8){
     uint32_t sys = clock_get_hz(clk_sys);
 
-    // i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs
-    pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_sm, (float) sys / (float) (sample_rate * 128));
+    pio_sm_set_clkdiv_int_frac(PICO_AUDIO_I2S_PIO, i2s_sm, (uint16_t) (div_fp8 >> 8), (uint8_t) div_fp8);
 
 #if I2S_HAVE_MCLK
     // MCLK is fixed at 22.5792 / 24.576 MHz; i2s_mclk halves its state machine clock
     float mclk_sm_hz = (sample_rate % 48000 == 0) ? 49.152e6f : 45.1584e6f;
     pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_mclk_sm, (float) sys / mclk_sm_hz);
 #endif
+
+    current_rate = sample_rate;
+
+    // worth knowing rather than discovering by ear
+    uint64_t achieved_mhz = (2000ull * sys + div_fp8 / 2) / div_fp8;
+    int32_t  error_ppm    = (int32_t) (((int64_t) achieved_mhz - (int64_t) sample_rate * 1000) * 1000 / sample_rate);
+    printf("I2S             : %lu Hz, divider %lu+%lu/256, %+ld ppm\n",
+           (unsigned long) sample_rate, (unsigned long) (div_fp8 >> 8),
+           (unsigned long) (div_fp8 & 0xff), (long) error_ppm);
 }
 
-static void i2s_start(uint32_t sample_rate){
+// Drops audio queued for the DMA but not yet loaded into a channel, so none of
+// it plays at a rate it was not made for. What is loaded or playing - at most
+// two buffers - finishes on its own.
+static void discard_queued(void){
+    uint32_t saved = save_and_disable_interrupts();
+    for (uint8_t i = 0; i < PICO_AUDIO_I2S_NUM_BUFFERS; i++){
+        if (i != chan_buffer[0] && i != chan_buffer[1]) buffer_ready[i] = false;
+    }
+    restore_interrupts(saved);
+}
+
+bool audio_out_set_sample_rate(uint32_t sample_rate){
+    if (!i2s_started) return false;
+
+    uint32_t div_fp8 = data_clkdiv_fp8(sample_rate);
+    if (div_fp8 == 0) return false;
+    if (sample_rate == current_rate) return true;
+    if (fill_callback != NULL) return false;    // mid-stream: stop first
+
+    discard_queued();
+    program_sample_rate(sample_rate, div_fp8);
+    return true;
+}
+
+uint32_t audio_out_sample_rate(void){
+    return current_rate;
+}
+
+static void i2s_start(uint32_t sample_rate, uint32_t div_fp8){
     PIO pio = PICO_AUDIO_I2S_PIO;
 
     i2s_sm = pio_claim_unused_sm(pio, true);
@@ -201,7 +252,7 @@ static void i2s_start(uint32_t sample_rate){
     pio_sm_set_pins(pio, i2s_sm, 0);
     pio_sm_clear_fifos(pio, i2s_sm);
 
-    audio_out_set_sample_rate(sample_rate);
+    program_sample_rate(sample_rate, div_fp8);
 
     i2s_dma_chan[0] = dma_claim_unused_channel(true);
     i2s_dma_chan[1] = dma_claim_unused_channel(true);
@@ -237,10 +288,15 @@ static void i2s_start(uint32_t sample_rate){
 }
 
 
-void audio_out_init(uint32_t sample_rate){
-    if (i2s_started) return;
-    i2s_start(sample_rate);
+bool audio_out_init(uint32_t sample_rate){
+    if (i2s_started) return true;
+
+    uint32_t div_fp8 = data_clkdiv_fp8(sample_rate);
+    if (div_fp8 == 0) return false;
+
+    i2s_start(sample_rate, div_fp8);
     i2s_started = true;
+    return true;
 }
 
 void audio_out_set_volume(int32_t gain){

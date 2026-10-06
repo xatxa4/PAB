@@ -69,7 +69,6 @@ static void (*playback_callback)(int16_t * buffer, uint16_t num_frames);
 static btstack_timer_source_t driver_timer_sink;
 static bool     sink_active;
 static uint8_t  sink_channel_count;
-static uint32_t sink_sample_rate;
 
 // scratch for the 16 bit samples coming out of the A2DP pipeline
 static int16_t render_pcm[1024 * 2];
@@ -126,10 +125,11 @@ static int btstack_audio_pico_sink_init(
     playback_callback  = playback;
     sink_channel_count = channels;
 
-    audio_out_init(samplerate);
-    if (samplerate != sink_sample_rate){
-        audio_out_set_sample_rate(samplerate);
-        sink_sample_rate = samplerate;
+    // the first call starts the clocks at this rate, later ones change it.
+    // BTstack calls this between streams, which is what a rate change needs.
+    if (!audio_out_init(samplerate) || !audio_out_set_sample_rate(samplerate)){
+        printf("I2S             : cannot play %lu Hz\n", (unsigned long) samplerate);
+        return -1;
     }
 
     return 0;
