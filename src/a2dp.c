@@ -42,6 +42,8 @@
 
 #include "a2dp.h"
 
+#include <stdio.h>
+
 #include <btstack.h>
 #include <btstack_resample.h>
 #include <classic/a2dp_sink.h>
@@ -61,7 +63,21 @@
 #define ADDITIONAL_FRAMES  10
 #define NUM_CHANNELS       2
 #define BYTES_PER_FRAME    (2*NUM_CHANNELS)
-#define MAX_SBC_FRAME_SIZE 120
+
+// Highest bitpool _sbc_capabilities offers a source.
+#define ADVERTISED_MAX_BITPOOL 53
+
+// SBC frame length in bytes (A2DP spec 12.9): header and CRC, scale factors,
+// then the audio bits rounded up to a whole byte.
+#define SBC_FRAME_BYTES(channels, subbands, audio_bits) \
+    (4 + (4 * (subbands) * (channels)) / 8 + ((audio_bits) + 7) / 8)
+
+// The largest frame _sbc_capabilities lets a source send: dual channel, 8
+// subbands, 16 blocks, where each channel spends its own bitpool. 224 bytes at
+// bitpool 53. The 120 inherited from a2dp_sink_demo only covers joint stereo
+// (119), so a dual channel stream - SBC XQ - overran the stack buffer in
+// playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
+#define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
 
 
 typedef struct {
@@ -89,7 +105,7 @@ typedef enum {
 static const uint8_t _sbc_capabilities[] = {
     0xFF,  // (AVDTP_SBC_44100 << 4) | AVDTP_SBC_STEREO,
     0xFF,  // (AVDTP_SBC_BLOCK_LENGTH_16 << 4) | (AVDTP_SBC_SUBBANDS_8 << 2) | AVDTP_SBC_ALLOCATION_METHOD_LOUDNESS
-    2, 53
+    2, ADVERTISED_MAX_BITPOOL
 };
 uint8_t _seid = 0;
 uint16_t _cid = 0;
@@ -256,6 +272,28 @@ static void media_processing_close(void) {
 }
 
 
+// Largest frame a source may send under configuration c, i.e. at its maximum
+// bitpool. Mono and dual channel spend a bitpool per channel; joint stereo
+// adds a join bit per subband.
+static unsigned sbc_max_frame_bytes(const sbc_configuration_t * c) {
+    unsigned channels = (c->channel_mode == SBC_CHANNEL_MODE_MONO) ? 1 : 2;
+    unsigned bits;
+
+    switch (c->channel_mode){
+        case SBC_CHANNEL_MODE_JOINT_STEREO:
+            bits = c->subbands + c->block_length * c->max_bitpool_value;
+            break;
+        case SBC_CHANNEL_MODE_STEREO:
+            bits = c->block_length * c->max_bitpool_value;
+            break;
+        default:
+            bits = c->block_length * channels * c->max_bitpool_value;
+            break;
+    }
+    return SBC_FRAME_BYTES(channels, c->subbands, bits);
+}
+
+
 static void event_handler(uint8_t event, uint8_t *packet) {
     uint8_t status;
     uint8_t allocation_method;
@@ -298,6 +336,15 @@ static void event_handler(uint8_t event, uint8_t *packet) {
                     break;
             }
             // dump_sbc_configuration(&_a2dp->_sbc_configuration);
+
+            // MAX_SBC_FRAME_SIZE covers everything we advertise, so this only
+            // fires if the capabilities and the limit drift apart. Say so now
+            // rather than leave media_handler dropping the stream in silence.
+            unsigned frame_bytes = sbc_max_frame_bytes(&_sbc_configuration);
+            if (frame_bytes > MAX_SBC_FRAME_SIZE){
+                printf("A2DP  Sink      : SBC frames of up to %u bytes negotiated, only %u fit\n",
+                       frame_bytes, (unsigned) MAX_SBC_FRAME_SIZE);
+            }
             break;
         }
 
@@ -444,9 +491,13 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     int packet_length = size-pos;
     uint8_t *packet_begin = packet + pos;
 
-    // store sbc frame size for buffer management
+    // store sbc frame size for buffer management. It comes off the wire, so it
+    // is a bound to check rather than a number to trust: playback_handler reads
+    // one frame of this size into a MAX_SBC_FRAME_SIZE stack buffer.
     if (sbc_header.num_frames == 0) return;
-    _sbc_frame_size = packet_length / sbc_header.num_frames;
+    unsigned frame_size = packet_length / sbc_header.num_frames;
+    if (frame_size == 0 || frame_size > MAX_SBC_FRAME_SIZE) return;   // drop it
+    _sbc_frame_size = frame_size;
     int status = btstack_ring_buffer_write(&_sbc_frame_ring_buffer, packet_begin, packet_length);
     // if (status != ERROR_CODE_SUCCESS){
     //     printf("Error storing samples in SBC ring buffer!!!\n");
