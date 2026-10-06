@@ -123,6 +123,13 @@ uint8_t _decoded_audio_storage[(128+16) * BYTES_PER_FRAME] = {0};
 int16_t * _request_buffer = 0;
 int _request_frames = 0;
 
+// A ring buffer write that does not fit is refused whole, so each of these is
+// audio thrown away. Together with audio_out_underruns() they tell "source too
+// slow" apart from "source too fast, or buffer too small".
+static uint32_t _sbc_frames_dropped;    // SBC ring full
+static uint32_t _pcm_frames_dropped;    // decoded PCM ring full
+static uint32_t _sbc_frames_rejected;   // larger than MAX_SBC_FRAME_SIZE
+
 
 // send decoded frames to the i2s buffer or ringbuffer. Volume is applied by the
 // sink, in the 32 bit domain - attenuating here first would throw away
@@ -151,10 +158,32 @@ static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channe
     int frames_to_store = resampled_frames - frames_to_copy;
     if (frames_to_store) {
         int status = btstack_ring_buffer_write(&_decoded_audio_ring_buffer, (uint8_t *)&output_buffer[frames_to_copy * NUM_CHANNELS], frames_to_store * BYTES_PER_FRAME);
-        // if (status){
-        //     printf("Error storing samples in PCM ring buffer!!!\n");
-        // }
+        if (status != ERROR_CODE_SUCCESS){
+            _pcm_frames_dropped += frames_to_store;
+        }
     }
+}
+
+
+// Throttled to once a second, like the underrun report, so reporting cannot
+// make the problem worse.
+static void report_drops(void) {
+    static uint32_t last_ms;
+    static uint32_t reported_dropped, reported_pcm, reported_rejected;
+
+    if (_sbc_frames_dropped == reported_dropped &&
+        _pcm_frames_dropped == reported_pcm &&
+        _sbc_frames_rejected == reported_rejected) return;
+
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if ((uint32_t) (now - last_ms) < 1000) return;
+    last_ms = now;
+
+    reported_dropped  = _sbc_frames_dropped;
+    reported_pcm      = _pcm_frames_dropped;
+    reported_rejected = _sbc_frames_rejected;
+    printf("A2DP  Sink      : frames dropped: %lu SBC ring full, %lu PCM ring full, %lu SBC too large\n",
+           (unsigned long) reported_dropped, (unsigned long) reported_pcm, (unsigned long) reported_rejected);
 }
 
 
@@ -495,13 +524,17 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     // is a bound to check rather than a number to trust: playback_handler reads
     // one frame of this size into a MAX_SBC_FRAME_SIZE stack buffer.
     if (sbc_header.num_frames == 0) return;
+    report_drops();
     unsigned frame_size = packet_length / sbc_header.num_frames;
-    if (frame_size == 0 || frame_size > MAX_SBC_FRAME_SIZE) return;   // drop it
+    if (frame_size == 0 || frame_size > MAX_SBC_FRAME_SIZE) {
+        _sbc_frames_rejected += sbc_header.num_frames;
+        return;
+    }
     _sbc_frame_size = frame_size;
     int status = btstack_ring_buffer_write(&_sbc_frame_ring_buffer, packet_begin, packet_length);
-    // if (status != ERROR_CODE_SUCCESS){
-    //     printf("Error storing samples in SBC ring buffer!!!\n");
-    // }
+    if (status != ERROR_CODE_SUCCESS){
+        _sbc_frames_dropped += sbc_header.num_frames;
+    }
 
     // decide on audio sync drift based on number of sbc frames in queue
     int sbc_frames_in_buffer = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
@@ -551,4 +584,19 @@ void a2dp_sink_begin() {
 
     // lets the source ask for our latency and sync video to it
     avdtp_sink_register_delay_reporting_category(_seid);
+}
+
+
+uint32_t a2dp_sink_sbc_frames_dropped(void) {
+    return _sbc_frames_dropped;
+}
+
+
+uint32_t a2dp_sink_pcm_frames_dropped(void) {
+    return _pcm_frames_dropped;
+}
+
+
+uint32_t a2dp_sink_sbc_frames_rejected(void) {
+    return _sbc_frames_rejected;
 }
