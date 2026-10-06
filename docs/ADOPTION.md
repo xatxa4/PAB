@@ -21,6 +21,33 @@ checked against them:
 
 Tiers are ordered by what blocks what, not by size.
 
+## Status
+
+Steps 1–4 of the suggested order are in. Line numbers in the item text refer to
+the tree the list was written against, before the fixes.
+
+| Item | State | Commit |
+|---|---|---|
+| 0.1 SBC frame size bound | **Done** | `80be9f2` |
+| 0.2 Ring buffer overflows counted and reported | **Done** | `f0d7820` |
+| 0.3 SBC ring headroom, asserted | **Done** | `4a0b803` |
+| Tier 3 `-Wall -Wextra`, git build stamp | **Done** | `b860410` |
+| 1.4 DMA IRQ and bus priority | **Done** | `86b623a` |
+| 1.3 Rate-change contract | **Done** | `6e9acaf` |
+| 1.2 Buffers sized in time | **Done** | `f9ebacc` |
+| `PAB_STDIO` linked UART stdio into every build (found on the way, not in the list below) | **Done** | `952d688` |
+| 1.1 Mode descriptor | Open — next | |
+| 1.5 Fault handler, watchdog | Open — after 1.1 | |
+| 1.6 Display off the audio thread | Open — no display code yet | |
+| Tier 3 `PAB_MODES` | Open | |
+| Measurement, then Tier 2 | Open — Tier 2 waits on 1.1 and the numbers | |
+
+Everything above builds warning-free against Pico SDK 2.1.1 and 1.5.1, each
+commit on its own. None of it has been on hardware yet: the first thing to
+check on the bench is an SBC XQ (dual channel) stream, which 0.1 should turn
+from a crash into working audio, and the `I2S : ... Hz ... ppm` line at stream
+start.
+
 ---
 
 ## Tier 0 — These are bugs
@@ -78,6 +105,13 @@ so raising the advertised bitpool later cannot quietly re-break it.
 Fixing this **also unlocks SBC XQ**, which is the cheapest audio-quality
 improvement available and needs no protocol work.
 
+> **Adopted** (`80be9f2`). `MAX_SBC_FRAME_SIZE` is now derived from
+> `ADVERTISED_MAX_BITPOOL` for the dual channel worst case (224), so the
+> capabilities and the limit cannot drift apart; the per-packet size is
+> checked before use; and the negotiated configuration is checked against the
+> limit when it arrives. (The name `SBC_MAX_BITPOOL` is taken by BTstack's SBC
+> decoder.)
+
 *Future-proofing:* none of this is Bluetooth-specific in spirit — it is the
 general rule that a frame size taken from an input is a bound to check, not a
 number to trust. The same applies to USB isochronous packet lengths and S/PDIF
@@ -101,6 +135,10 @@ Handle the status: count the drops, expose the counter alongside
 *source too slow* (underrun) from *source too fast / buffer too small* (overflow)
 turn the next stutter report into a five-minute diagnosis instead of a week.
 
+> **Adopted** (`f0d7820`). SBC frames dropped, PCM frames dropped and SBC
+> frames rejected by 0.1 are counted, exposed as `a2dp_sink_*()` and printed
+> at most once a second as `A2DP  Sink : frames dropped: ...`.
+
 ### 0.3 The SBC frame store has almost no headroom
 
 ```c
@@ -113,6 +151,11 @@ depth hits 0.2 immediately. And note the sizing multiplies by
 `MAX_SBC_FRAME_SIZE`: raising that to 224 grows this from 6000 to 11200 bytes
 (fine, there is 264 KB), but the *frame count* stays 50 only if the arithmetic
 is kept honest. Assert it rather than hoping.
+
+> **Adopted** (`4a0b803`). `ADDITIONAL_FRAMES` is 30, BTstack's own value, and
+> a static assertion requires room for the target depth plus one maximal
+> packet (15 frames) of the largest frame. The old value fails it. The ring is
+> 15.7 KB.
 
 ---
 
@@ -180,6 +223,13 @@ can pick their own timer interval instead of hardcoding 5 ms.
 
 This is rock number one, and it is already in the tree.
 
+> **Adopted** (`f9ebacc`). `PICO_AUDIO_I2S_BUFFER_US` (11610, still exactly 512
+> frames at 44.1 kHz) replaces `_BUFFER_FRAMES`, which is now an `#error`.
+> Buffers are allocated for `PICO_AUDIO_I2S_MAX_SAMPLE_RATE` (96 kHz, ~45 KB)
+> and rates above it are refused. `audio_out_service_interval_ms()` gives the
+> deadline, and the Bluetooth sink polls at it. Every rate from 16 to 96 kHz
+> now gets 11.6 ms buffers, 46 ms of latency and a 5 ms interval.
+
 ### 1.3 `audio_out`: validate and document the rate-change contract
 
 `audio_out_set_sample_rate()` accepts anything and returns nothing. It is called
@@ -195,6 +245,11 @@ rather than discovering by ear.
 *Note:* `_sbc_capabilities` already advertises 16 and 32 kHz. Those paths have
 never been exercised.
 
+> **Adopted** (`6e9acaf`). Returns `bool`; refuses a change mid-stream or a
+> rate the divider cannot reach; discards audio queued for the old rate; and
+> computes the 16.8 divider itself, rounded rather than truncated — 44.1 kHz
+> goes from +165 ppm to −12 ppm. The achieved rate and error are printed.
+
 ### 1.4 DMA IRQ priority and bus priority
 
 Two lines, no design implications, and they harden every future source that uses
@@ -208,6 +263,10 @@ bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_R_BITS | BUSCTRL_BUS_PRIORITY_D
 The refill IRQ currently ranks equal with the CYW43 background IRQ, and DMA
 ranks below the processors on the bus. Neither is what you want for an audio
 path that must not miss a buffer boundary.
+
+> **Adopted** (`86b623a`). Confirmed nothing else uses `DMA_IRQ_0` — the CYW43
+> bus polls its DMA. Uses `hardware/structs/bus_ctrl.h` / `bus_ctrl_hw`, the
+> spelling SDK 1.5 and 2.x share.
 
 ### 1.5 Hard fault handler and a real watchdog
 
@@ -235,7 +294,7 @@ about 1026 bytes, and every I2C byte costs 9 bit periods with its ACK:
 | Full frame (1026 B) | 23.1 ms | 9.2 ms |
 | One page (130 B) | 2.9 ms | 1.2 ms |
 
-Against the audio ring, which is `4 × 512` frames:
+Against the audio ring, which was `4 × 512` frames when this was written:
 
 | Sample rate | Ring depth | Full frame at 400 kHz |
 |---|---|---|
@@ -243,9 +302,11 @@ Against the audio ring, which is `4 × 512` frames:
 | 48 000 Hz | 42.7 ms | eats half the ring |
 | 96 000 Hz | 21.3 ms | **exceeds the whole ring** |
 
-So one `i2c_write_blocking()` of a full frame from the run loop stalls
-`audio_out_service()` *and* BTstack for 23 ms. At 44.1 kHz it survives on the
-ring's margin; at 96 kHz it cannot. It also makes 0.2 more likely — 23 ms of
+Since 1.2 the ring is 46.4 ms at every rate, so the 96 kHz row is gone — but
+half the ring per call is still half the ring, and the service deadline is
+5.8 ms, a quarter of one full-frame write. So one `i2c_write_blocking()` of a
+full frame from the run loop stalls `audio_out_service()` *and* BTstack for
+23 ms, and survives only on the ring's margin. It also makes 0.2 more likely — 23 ms of
 blocked run loop is 23 ms of A2DP packets arriving into a ring nobody is
 draining, and that overflow is currently silent.
 
@@ -262,9 +323,9 @@ Run the bus at 1 MHz while you are at it; the RP2040 supports Fast-mode Plus and
 `i2c_init()` returns the baud it actually achieved.
 
 *Rocks:* this is the same rule as 1.2 in a different costume — anything that
-blocks the loop must be measured against the ring in **time**, and the ring
-shrinks as the rate rises. Whatever you do here should be sized against the
-worst rate the box will ever run, not 44.1 kHz.
+blocks the loop must be measured against the ring in **time**. 1.2 fixed the
+ring's depth in time; the blocking budget is `audio_out_service_interval_ms()`,
+not whatever 44.1 kHz happened to allow.
 
 ---
 
@@ -393,10 +454,15 @@ attacking at all.
 ## Tier 3 — Cheap, do them while touching the files anyway
 
 - **`-Wall -Wextra`.** Currently off; turning it on surfaces exactly the two
-  real bugs in 0.2 and nothing else. That is a good ratio.
+  real bugs in 0.2 and nothing else. That is a good ratio. **Adopted**
+  (`b860410`), for `src/` only — the SDK's INTERFACE libraries compile into the
+  same target. Confirmed: the old `a2dp.c` warns at :137 and :450 and nowhere
+  else. It caught a missing declaration in 1.2 before it was ever committed.
 - **Git hash in the build.** Two rounds of debugging in this project were spent
   testing a binary that did not contain the fix. A hash printed at boot ends
-  that class of problem permanently.
+  that class of problem permanently. **Adopted** (`b860410`): `git describe
+  --dirty`, regenerated on every build, printed at boot and embedded as binary
+  info, so `picotool info picow-a2dp.uf2` answers the question before flashing.
 - **`PAB_MODES` build option** — compile out personalities you are not shipping.
   Matters more with four modes than with two.
 

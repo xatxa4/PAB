@@ -46,8 +46,17 @@ cmake -B build -DPICO_BOARD=pico_w -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Options: `-DPAB_STDIO=usb|uart|none` (default `usb`). Pin assignments, I2S
-buffer depth and the Bluetooth name are compile definitions in `CMakeLists.txt`.
+Options: `-DPAB_STDIO=usb|uart|none` (default `usb`), which selects exactly
+that console and no other. Pin assignments, I2S buffer depth (in time:
+`PICO_AUDIO_I2S_BUFFER_US`), the highest supported sample rate and the Bluetooth
+name are compile definitions in `CMakeLists.txt`.
+
+Every build is stamped with `git describe --dirty`. It is printed at boot, and
+`picotool info build/picow-a2dp.uf2` reads it off the file before flashing — a
+`-dirty` suffix means uncommitted changes went in.
+
+What to work on next, and why in that order, is in
+[`docs/ADOPTION.md`](docs/ADOPTION.md).
 
 ---
 

@@ -43,8 +43,22 @@
 #ifndef a2dp_h
 #define a2dp_h
 
+#include <stdint.h>
+
 
 void a2dp_sink_begin();
+
+/// SBC frames thrown away because the SBC ring was full: the source is running
+/// ahead of us, or the ring is too small. audio_out_underruns() counts the
+/// opposite case, so between them a gap can be pinned on one side or the other.
+uint32_t a2dp_sink_sbc_frames_dropped(void);
+
+/// Decoded frames thrown away because the PCM ring was full.
+uint32_t a2dp_sink_pcm_frames_dropped(void);
+
+/// SBC frames thrown away because they were larger than the stack buffer
+/// playback_handler decodes from.
+uint32_t a2dp_sink_sbc_frames_rejected(void);
 
 
 #endif

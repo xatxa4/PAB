@@ -42,6 +42,8 @@
 
 #include "a2dp.h"
 
+#include <stdio.h>
+
 #include <btstack.h>
 #include <btstack_resample.h>
 #include <classic/a2dp_sink.h>
@@ -58,10 +60,30 @@
 // lip sync out by a third of a second.
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
-#define ADDITIONAL_FRAMES  10
+
+// Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
+// burst. A full ring refuses a whole packet, and a packet carries up to 15
+// frames, so this must hold at least one maximal packet on top of the target
+// depth. Costs RAM only - the resampler, not the ring size, sets the latency.
+#define ADDITIONAL_FRAMES  30
+#define MAX_FRAMES_PER_PACKET 15    // 4 bit field in the SBC media payload header
 #define NUM_CHANNELS       2
 #define BYTES_PER_FRAME    (2*NUM_CHANNELS)
-#define MAX_SBC_FRAME_SIZE 120
+
+// Highest bitpool _sbc_capabilities offers a source.
+#define ADVERTISED_MAX_BITPOOL 53
+
+// SBC frame length in bytes (A2DP spec 12.9): header and CRC, scale factors,
+// then the audio bits rounded up to a whole byte.
+#define SBC_FRAME_BYTES(channels, subbands, audio_bits) \
+    (4 + (4 * (subbands) * (channels)) / 8 + ((audio_bits) + 7) / 8)
+
+// The largest frame _sbc_capabilities lets a source send: dual channel, 8
+// subbands, 16 blocks, where each channel spends its own bitpool. 224 bytes at
+// bitpool 53. The 120 inherited from a2dp_sink_demo only covers joint stereo
+// (119), so a dual channel stream - SBC XQ - overran the stack buffer in
+// playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
+#define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
 
 
 typedef struct {
@@ -89,7 +111,7 @@ typedef enum {
 static const uint8_t _sbc_capabilities[] = {
     0xFF,  // (AVDTP_SBC_44100 << 4) | AVDTP_SBC_STEREO,
     0xFF,  // (AVDTP_SBC_BLOCK_LENGTH_16 << 4) | (AVDTP_SBC_SUBBANDS_8 << 2) | AVDTP_SBC_ALLOCATION_METHOD_LOUDNESS
-    2, 53
+    2, ADVERTISED_MAX_BITPOOL
 };
 uint8_t _seid = 0;
 uint16_t _cid = 0;
@@ -103,9 +125,18 @@ btstack_resample_t _resample_instance = {0};
 btstack_ring_buffer_t _sbc_frame_ring_buffer = {0};
 btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
 uint8_t _sbc_frame_storage[(OPTIMAL_FRAMES_MAX + ADDITIONAL_FRAMES) * MAX_SBC_FRAME_SIZE] = {0};
+_Static_assert(sizeof(_sbc_frame_storage) / MAX_SBC_FRAME_SIZE >= OPTIMAL_FRAMES_MAX + MAX_FRAMES_PER_PACKET,
+               "SBC ring cannot take a full packet of the largest frames on top of the target depth");
 uint8_t _decoded_audio_storage[(128+16) * BYTES_PER_FRAME] = {0};
 int16_t * _request_buffer = 0;
 int _request_frames = 0;
+
+// A ring buffer write that does not fit is refused whole, so each of these is
+// audio thrown away. Together with audio_out_underruns() they tell "source too
+// slow" apart from "source too fast, or buffer too small".
+static uint32_t _sbc_frames_dropped;    // SBC ring full
+static uint32_t _pcm_frames_dropped;    // decoded PCM ring full
+static uint32_t _sbc_frames_rejected;   // larger than MAX_SBC_FRAME_SIZE
 
 
 // send decoded frames to the i2s buffer or ringbuffer. Volume is applied by the
@@ -135,10 +166,32 @@ static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channe
     int frames_to_store = resampled_frames - frames_to_copy;
     if (frames_to_store) {
         int status = btstack_ring_buffer_write(&_decoded_audio_ring_buffer, (uint8_t *)&output_buffer[frames_to_copy * NUM_CHANNELS], frames_to_store * BYTES_PER_FRAME);
-        // if (status){
-        //     printf("Error storing samples in PCM ring buffer!!!\n");
-        // }
+        if (status != ERROR_CODE_SUCCESS){
+            _pcm_frames_dropped += frames_to_store;
+        }
     }
+}
+
+
+// Throttled to once a second, like the underrun report, so reporting cannot
+// make the problem worse.
+static void report_drops(void) {
+    static uint32_t last_ms;
+    static uint32_t reported_dropped, reported_pcm, reported_rejected;
+
+    if (_sbc_frames_dropped == reported_dropped &&
+        _pcm_frames_dropped == reported_pcm &&
+        _sbc_frames_rejected == reported_rejected) return;
+
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if ((uint32_t) (now - last_ms) < 1000) return;
+    last_ms = now;
+
+    reported_dropped  = _sbc_frames_dropped;
+    reported_pcm      = _pcm_frames_dropped;
+    reported_rejected = _sbc_frames_rejected;
+    printf("A2DP  Sink      : frames dropped: %lu SBC ring full, %lu PCM ring full, %lu SBC too large\n",
+           (unsigned long) reported_dropped, (unsigned long) reported_pcm, (unsigned long) reported_rejected);
 }
 
 
@@ -256,6 +309,28 @@ static void media_processing_close(void) {
 }
 
 
+// Largest frame a source may send under configuration c, i.e. at its maximum
+// bitpool. Mono and dual channel spend a bitpool per channel; joint stereo
+// adds a join bit per subband.
+static unsigned sbc_max_frame_bytes(const sbc_configuration_t * c) {
+    unsigned channels = (c->channel_mode == SBC_CHANNEL_MODE_MONO) ? 1 : 2;
+    unsigned bits;
+
+    switch (c->channel_mode){
+        case SBC_CHANNEL_MODE_JOINT_STEREO:
+            bits = c->subbands + c->block_length * c->max_bitpool_value;
+            break;
+        case SBC_CHANNEL_MODE_STEREO:
+            bits = c->block_length * c->max_bitpool_value;
+            break;
+        default:
+            bits = c->block_length * channels * c->max_bitpool_value;
+            break;
+    }
+    return SBC_FRAME_BYTES(channels, c->subbands, bits);
+}
+
+
 static void event_handler(uint8_t event, uint8_t *packet) {
     uint8_t status;
     uint8_t allocation_method;
@@ -298,6 +373,15 @@ static void event_handler(uint8_t event, uint8_t *packet) {
                     break;
             }
             // dump_sbc_configuration(&_a2dp->_sbc_configuration);
+
+            // MAX_SBC_FRAME_SIZE covers everything we advertise, so this only
+            // fires if the capabilities and the limit drift apart. Say so now
+            // rather than leave media_handler dropping the stream in silence.
+            unsigned frame_bytes = sbc_max_frame_bytes(&_sbc_configuration);
+            if (frame_bytes > MAX_SBC_FRAME_SIZE){
+                printf("A2DP  Sink      : SBC frames of up to %u bytes negotiated, only %u fit\n",
+                       frame_bytes, (unsigned) MAX_SBC_FRAME_SIZE);
+            }
             break;
         }
 
@@ -444,13 +528,21 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     int packet_length = size-pos;
     uint8_t *packet_begin = packet + pos;
 
-    // store sbc frame size for buffer management
+    // store sbc frame size for buffer management. It comes off the wire, so it
+    // is a bound to check rather than a number to trust: playback_handler reads
+    // one frame of this size into a MAX_SBC_FRAME_SIZE stack buffer.
     if (sbc_header.num_frames == 0) return;
-    _sbc_frame_size = packet_length / sbc_header.num_frames;
+    report_drops();
+    unsigned frame_size = packet_length / sbc_header.num_frames;
+    if (frame_size == 0 || frame_size > MAX_SBC_FRAME_SIZE) {
+        _sbc_frames_rejected += sbc_header.num_frames;
+        return;
+    }
+    _sbc_frame_size = frame_size;
     int status = btstack_ring_buffer_write(&_sbc_frame_ring_buffer, packet_begin, packet_length);
-    // if (status != ERROR_CODE_SUCCESS){
-    //     printf("Error storing samples in SBC ring buffer!!!\n");
-    // }
+    if (status != ERROR_CODE_SUCCESS){
+        _sbc_frames_dropped += sbc_header.num_frames;
+    }
 
     // decide on audio sync drift based on number of sbc frames in queue
     int sbc_frames_in_buffer = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
@@ -500,4 +592,19 @@ void a2dp_sink_begin() {
 
     // lets the source ask for our latency and sync video to it
     avdtp_sink_register_delay_reporting_category(_seid);
+}
+
+
+uint32_t a2dp_sink_sbc_frames_dropped(void) {
+    return _sbc_frames_dropped;
+}
+
+
+uint32_t a2dp_sink_pcm_frames_dropped(void) {
+    return _pcm_frames_dropped;
+}
+
+
+uint32_t a2dp_sink_sbc_frames_rejected(void) {
+    return _sbc_frames_rejected;
 }

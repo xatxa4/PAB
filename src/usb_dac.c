@@ -60,11 +60,13 @@ void usb_dac_run(void){
 
     // Clocks come up anyway, so the DAC stays locked and the wiring can be
     // checked with a scope in this mode.
-    audio_out_init(USB_DAC_SAMPLE_RATE);
+    if (!audio_out_init(USB_DAC_SAMPLE_RATE)){
+        printf("USB DAC         : cannot play %d Hz\n", USB_DAC_SAMPLE_RATE);
+    }
 
     while (true){
         audio_out_service();    // no fill callback registered: plays silence
-        mode_button_poll();     // rate limits itself, so 5ms here is fine
-        sleep_ms(5);
+        mode_button_poll();     // rate limits itself
+        sleep_ms(audio_out_service_interval_ms());
     }
 }

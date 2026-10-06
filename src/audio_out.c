@@ -41,12 +41,15 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
+#include "hardware/structs/bus_ctrl.h"   // the name SDK 1.5 and 2.x share
 
 #include "i2s.pio.h"
 
@@ -76,22 +79,41 @@
 #define PICO_AUDIO_I2S_PIO              pio1
 #endif
 
-// Audio queued ahead of the DAC. 4 x 512 frames is ~46ms at 44.1kHz, of which
-// one buffer is playing and one is loaded in the chained channel, so the run
-// loop has two to refill. Shrinking this cuts latency.
+// Audio queued ahead of the DAC. 4 x 11.6ms is ~46ms, of which one buffer is
+// playing and one is loaded in the chained channel, so the run loop has two to
+// refill. Shrinking this cuts latency.
 #ifndef PICO_AUDIO_I2S_NUM_BUFFERS
 #define PICO_AUDIO_I2S_NUM_BUFFERS      4
 #endif
 
-#ifndef PICO_AUDIO_I2S_BUFFER_FRAMES
-#define PICO_AUDIO_I2S_BUFFER_FRAMES    512
+// Buffers are sized in time, not frames, so the latency and the service
+// deadline stay put when the rate changes. 512 frames was 11.6ms at 44.1kHz
+// but would be 5.3ms at 96kHz, leaving a 2.7ms service deadline that a 5ms
+// tick cannot meet.
+#ifdef PICO_AUDIO_I2S_BUFFER_FRAMES
+#error "PICO_AUDIO_I2S_BUFFER_FRAMES is now PICO_AUDIO_I2S_BUFFER_US: buffers are sized in time"
+#endif
+#ifndef PICO_AUDIO_I2S_BUFFER_US
+#define PICO_AUDIO_I2S_BUFFER_US        11610   // 512 frames at 44.1kHz
 #endif
 
-#define BUFFER_WORDS              (PICO_AUDIO_I2S_BUFFER_FRAMES * 2)
+// The highest rate the buffers are allocated for; each uses as much of its
+// allocation as the current rate needs. 96kHz costs ~45KB for the ring and the
+// silence buffer, and every doubling doubles that.
+#ifndef PICO_AUDIO_I2S_MAX_SAMPLE_RATE
+#define PICO_AUDIO_I2S_MAX_SAMPLE_RATE  96000
+#endif
+
+#define FRAMES_FOR_RATE(rate) \
+    ((uint32_t) (((uint64_t) (rate) * PICO_AUDIO_I2S_BUFFER_US + 500000) / 1000000))
+
+#define MAX_BUFFER_WORDS    (FRAMES_FOR_RATE(PICO_AUDIO_I2S_MAX_SAMPLE_RATE) * 2)
 
 static audio_out_fill_fn fill_callback;
 static void *            fill_context;
 static bool              i2s_started;
+static uint32_t          current_rate;
+static volatile uint32_t buffer_frames;     // of each buffer, at current_rate
 
 static uint i2s_sm;
 #if I2S_HAVE_MCLK
@@ -109,8 +131,8 @@ static volatile int8_t chan_buffer[2] = { -1, -1 };   // -1 while playing silenc
 static volatile uint32_t underrun_count;
 
 // 32 bit stereo frames, interleaved left/right, as the PIO pulls them
-static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][BUFFER_WORDS];
-static int32_t silence_buffer[BUFFER_WORDS];
+static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][MAX_BUFFER_WORDS];
+static int32_t silence_buffer[MAX_BUFFER_WORDS];
 
 // buffer_ready means "holds audio", and stays set for as long as the DMA is
 // reading it - it is cleared only once the transfer has finished. The run loop
@@ -149,24 +171,74 @@ static void __time_critical_func(i2s_dma_handler)(void){
         }
 
         dma_channel_set_read_addr(i2s_dma_chan[c], src, false);
-        dma_channel_set_trans_count(i2s_dma_chan[c], BUFFER_WORDS, false);
+        dma_channel_set_trans_count(i2s_dma_chan[c], buffer_frames * 2, false);
     }
 }
 
-void audio_out_set_sample_rate(uint32_t sample_rate){
+// i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs and
+// the divider is clk_sys / (128 * rate). The PIO takes it in 16.8 fixed point,
+// which in 1/256ths is 2 * clk_sys / rate. Rounded to nearest: the float
+// pio_sm_set_clkdiv() truncates, which put 44.1kHz at +165ppm instead of -12.
+// Returns 0 if the buffers are not allocated for the rate, or the divider is
+// out of range - below 1, or past the 16 bit integer part.
+static uint32_t data_clkdiv_fp8(uint32_t sample_rate){
+    if (sample_rate > PICO_AUDIO_I2S_MAX_SAMPLE_RATE) return 0;
+    if (FRAMES_FOR_RATE(sample_rate) == 0) return 0;
+    uint64_t div = (2ull * clock_get_hz(clk_sys) + sample_rate / 2) / sample_rate;
+    return (div >= 0x100 && div <= 0xffffff) ? (uint32_t) div : 0;
+}
+
+static void program_sample_rate(uint32_t sample_rate, uint32_t div_fp8){
     uint32_t sys = clock_get_hz(clk_sys);
 
-    // i2s_data spends 128 cycles per stereo frame, so BCLK comes out at 64fs
-    pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_sm, (float) sys / (float) (sample_rate * 128));
+    pio_sm_set_clkdiv_int_frac(PICO_AUDIO_I2S_PIO, i2s_sm, (uint16_t) (div_fp8 >> 8), (uint8_t) div_fp8);
 
 #if I2S_HAVE_MCLK
     // MCLK is fixed at 22.5792 / 24.576 MHz; i2s_mclk halves its state machine clock
     float mclk_sm_hz = (sample_rate % 48000 == 0) ? 49.152e6f : 45.1584e6f;
     pio_sm_set_clkdiv(PICO_AUDIO_I2S_PIO, i2s_mclk_sm, (float) sys / mclk_sm_hz);
 #endif
+
+    current_rate  = sample_rate;
+    buffer_frames = FRAMES_FOR_RATE(sample_rate);
+
+    // worth knowing rather than discovering by ear
+    uint64_t achieved_mhz = (2000ull * sys + div_fp8 / 2) / div_fp8;
+    int32_t  error_ppm    = (int32_t) (((int64_t) achieved_mhz - (int64_t) sample_rate * 1000) * 1000 / sample_rate);
+    printf("I2S             : %lu Hz, divider %lu+%lu/256, %+ld ppm\n",
+           (unsigned long) sample_rate, (unsigned long) (div_fp8 >> 8),
+           (unsigned long) (div_fp8 & 0xff), (long) error_ppm);
 }
 
-static void i2s_start(uint32_t sample_rate){
+// Drops audio queued for the DMA but not yet loaded into a channel, so none of
+// it plays at a rate it was not made for. What is loaded or playing - at most
+// two buffers - finishes on its own.
+static void discard_queued(void){
+    uint32_t saved = save_and_disable_interrupts();
+    for (uint8_t i = 0; i < PICO_AUDIO_I2S_NUM_BUFFERS; i++){
+        if (i != chan_buffer[0] && i != chan_buffer[1]) buffer_ready[i] = false;
+    }
+    restore_interrupts(saved);
+}
+
+bool audio_out_set_sample_rate(uint32_t sample_rate){
+    if (!i2s_started) return false;
+
+    uint32_t div_fp8 = data_clkdiv_fp8(sample_rate);
+    if (div_fp8 == 0) return false;
+    if (sample_rate == current_rate) return true;
+    if (fill_callback != NULL) return false;    // mid-stream: stop first
+
+    discard_queued();
+    program_sample_rate(sample_rate, div_fp8);
+    return true;
+}
+
+uint32_t audio_out_sample_rate(void){
+    return current_rate;
+}
+
+static void i2s_start(uint32_t sample_rate, uint32_t div_fp8){
     PIO pio = PICO_AUDIO_I2S_PIO;
 
     i2s_sm = pio_claim_unused_sm(pio, true);
@@ -200,7 +272,7 @@ static void i2s_start(uint32_t sample_rate){
     pio_sm_set_pins(pio, i2s_sm, 0);
     pio_sm_clear_fifos(pio, i2s_sm);
 
-    audio_out_set_sample_rate(sample_rate);
+    program_sample_rate(sample_rate, div_fp8);
 
     i2s_dma_chan[0] = dma_claim_unused_channel(true);
     i2s_dma_chan[1] = dma_claim_unused_channel(true);
@@ -213,12 +285,21 @@ static void i2s_start(uint32_t sample_rate){
         channel_config_set_dreq(&dc, pio_get_dreq(pio, i2s_sm, true));
         channel_config_set_chain_to(&dc, i2s_dma_chan[c ^ 1]);
         dma_channel_configure(i2s_dma_chan[c], &dc, &pio->txf[i2s_sm],
-                              silence_buffer, BUFFER_WORDS, false);
+                              silence_buffer, buffer_frames * 2, false);
         dma_channel_set_irq0_enabled(i2s_dma_chan[c], true);
     }
 
     irq_add_shared_handler(DMA_IRQ_0, i2s_dma_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    // At the default priority the refill ranks equal with the CYW43 GPIO IRQ
+    // and waits behind it at a buffer boundary. Nothing else uses DMA_IRQ_0 -
+    // the CYW43 bus polls its DMA - so anything sharing it later must be as
+    // short as this handler.
+    irq_set_priority(DMA_IRQ_0, PICO_HIGHEST_IRQ_PRIORITY);
     irq_set_enabled(DMA_IRQ_0, true);
+
+    // DMA ahead of the processors on the bus, so a busy core cannot hold off
+    // the transfers feeding the PIO FIFO
+    hw_set_bits(&bus_ctrl_hw->priority, BUSCTRL_BUS_PRIORITY_DMA_R_BITS | BUSCTRL_BUS_PRIORITY_DMA_W_BITS);
 
     // clocks run from here on, feeding silence whenever nothing is streaming,
     // so the DAC never has to re-acquire between tracks
@@ -227,10 +308,15 @@ static void i2s_start(uint32_t sample_rate){
 }
 
 
-void audio_out_init(uint32_t sample_rate){
-    if (i2s_started) return;
-    i2s_start(sample_rate);
+bool audio_out_init(uint32_t sample_rate){
+    if (i2s_started) return true;
+
+    uint32_t div_fp8 = data_clkdiv_fp8(sample_rate);
+    if (div_fp8 == 0) return false;
+
+    i2s_start(sample_rate, div_fp8);
     i2s_started = true;
+    return true;
 }
 
 void audio_out_set_volume(int32_t gain){
@@ -254,6 +340,9 @@ void audio_out_service(void){
     audio_out_fill_fn fill = fill_callback;
     if (fill == NULL) return;
 
+    // fixed while a stream runs: the rate cannot change until it stops
+    uint32_t frames = buffer_frames;
+
     // start at the buffer the IRQ wants next, so it is never left behind
     uint8_t i = next_buffer;
 
@@ -263,11 +352,11 @@ void audio_out_service(void){
         if (buffer_ready[i]) continue;
 
         int32_t * dst = audio_buffer[i];
-        fill(dst, PICO_AUDIO_I2S_BUFFER_FRAMES, fill_context);
+        fill(dst, frames, fill_context);
 
         int32_t gain = volume_gain;
         if (gain != AUDIO_OUT_UNITY_GAIN){
-            for (int w = 0; w < BUFFER_WORDS; w++){
+            for (uint32_t w = 0; w < frames * 2; w++){
                 dst[w] = (int32_t) (((int64_t) dst[w] * gain) >> 16);
             }
         }
@@ -277,12 +366,19 @@ void audio_out_service(void){
 }
 
 uint32_t audio_out_frames_per_buffer(void){
-    return PICO_AUDIO_I2S_BUFFER_FRAMES;
+    return buffer_frames;
+}
+
+uint32_t audio_out_service_interval_ms(void){
+    if (current_rate == 0) return 1;
+    // half a buffer period, rounded down
+    uint32_t ms = (uint32_t) (((uint64_t) buffer_frames * 500u) / current_rate);
+    return ms ? ms : 1;
 }
 
 uint32_t audio_out_latency_us(uint32_t sample_rate){
     if (sample_rate == 0) return 0;
-    uint32_t frames = PICO_AUDIO_I2S_NUM_BUFFERS * PICO_AUDIO_I2S_BUFFER_FRAMES;
+    uint32_t frames = PICO_AUDIO_I2S_NUM_BUFFERS * FRAMES_FOR_RATE(sample_rate);
     return (uint32_t) (((uint64_t) frames * 1000000u) / sample_rate);
 }
 
