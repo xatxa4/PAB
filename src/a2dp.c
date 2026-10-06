@@ -60,7 +60,13 @@
 // lip sync out by a third of a second.
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
-#define ADDITIONAL_FRAMES  10
+
+// Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
+// burst. A full ring refuses a whole packet, and a packet carries up to 15
+// frames, so this must hold at least one maximal packet on top of the target
+// depth. Costs RAM only - the resampler, not the ring size, sets the latency.
+#define ADDITIONAL_FRAMES  30
+#define MAX_FRAMES_PER_PACKET 15    // 4 bit field in the SBC media payload header
 #define NUM_CHANNELS       2
 #define BYTES_PER_FRAME    (2*NUM_CHANNELS)
 
@@ -119,6 +125,8 @@ btstack_resample_t _resample_instance = {0};
 btstack_ring_buffer_t _sbc_frame_ring_buffer = {0};
 btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
 uint8_t _sbc_frame_storage[(OPTIMAL_FRAMES_MAX + ADDITIONAL_FRAMES) * MAX_SBC_FRAME_SIZE] = {0};
+_Static_assert(sizeof(_sbc_frame_storage) / MAX_SBC_FRAME_SIZE >= OPTIMAL_FRAMES_MAX + MAX_FRAMES_PER_PACKET,
+               "SBC ring cannot take a full packet of the largest frames on top of the target depth");
 uint8_t _decoded_audio_storage[(128+16) * BYTES_PER_FRAME] = {0};
 int16_t * _request_buffer = 0;
 int _request_frames = 0;
