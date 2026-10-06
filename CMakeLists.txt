@@ -72,9 +72,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     # Set to 22 to drive it on GP22 again.
     # PICO_AUDIO_I2S_MCLK_PIN=22
     PICO_AUDIO_I2S_PIO=pio1
-    # ~46ms of audio queued ahead of the DAC. Lower for less delay.
+    # ~46ms of audio queued ahead of the DAC. Lower for less delay. Sized in
+    # time, so it means the same at every rate up to the maximum.
     PICO_AUDIO_I2S_NUM_BUFFERS=4
-    PICO_AUDIO_I2S_BUFFER_FRAMES=512
+    PICO_AUDIO_I2S_BUFFER_US=11610    # 512 frames at 44.1kHz
+    PICO_AUDIO_I2S_MAX_SAMPLE_RATE=96000
     # RUN_PIN=22
     CONN_PIN=26
     BT_PIN="0000"

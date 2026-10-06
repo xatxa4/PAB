@@ -62,34 +62,41 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DRIVER_POLL_INTERVAL_MS   5
-
 static void (*playback_callback)(int16_t * buffer, uint16_t num_frames);
 
 static btstack_timer_source_t driver_timer_sink;
 static bool     sink_active;
 static uint8_t  sink_channel_count;
+static uint32_t poll_interval_ms;
 
 // scratch for the 16 bit samples coming out of the A2DP pipeline
-static int16_t render_pcm[1024 * 2];
+#define RENDER_FRAMES 1024
+static int16_t render_pcm[RENDER_FRAMES * 2];
 
 static void sink_fill(int32_t * dst, uint32_t num_frames, void * context){
     UNUSED(context);
-    btstack_assert(num_frames <= (sizeof(render_pcm) / sizeof(render_pcm[0])) / 2);
 
-    (*playback_callback)(render_pcm, (uint16_t) num_frames);
+    // a buffer's length follows the rate, so it can outgrow the scratch
+    while (num_frames){
+        uint32_t frames = (num_frames < RENDER_FRAMES) ? num_frames : RENDER_FRAMES;
 
-    // shift as unsigned; negative operands make the signed shift undefined
-    if (sink_channel_count == 1){
-        for (uint32_t f = 0; f < num_frames; f++){
-            int32_t sample = (int32_t) ((uint32_t) render_pcm[f] << 16);
-            dst[2 * f    ] = sample;
-            dst[2 * f + 1] = sample;
+        (*playback_callback)(render_pcm, (uint16_t) frames);
+
+        // shift as unsigned; negative operands make the signed shift undefined
+        if (sink_channel_count == 1){
+            for (uint32_t f = 0; f < frames; f++){
+                int32_t sample = (int32_t) ((uint32_t) render_pcm[f] << 16);
+                dst[2 * f    ] = sample;
+                dst[2 * f + 1] = sample;
+            }
+        } else {
+            for (uint32_t w = 0; w < frames * 2; w++){
+                dst[w] = (int32_t) ((uint32_t) render_pcm[w] << 16);
+            }
         }
-    } else {
-        for (uint32_t w = 0; w < num_frames * 2; w++){
-            dst[w] = (int32_t) ((uint32_t) render_pcm[w] << 16);
-        }
+
+        dst        += frames * 2;
+        num_frames -= frames;
     }
 }
 
@@ -100,9 +107,10 @@ static void driver_timer_handler_sink(btstack_timer_source_t * ts){
     // says whether a gap was ours: the DMA ran out of audio and played silence.
     // Throttled to once a second so reporting cannot make the problem worse.
     static uint32_t reported;
-    static uint16_t ticks;
-    if (++ticks >= 1000 / DRIVER_POLL_INTERVAL_MS){
-        ticks = 0;
+    static uint32_t last_report_ms;
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if ((uint32_t) (now - last_report_ms) >= 1000){
+        last_report_ms = now;
         uint32_t underruns = audio_out_underruns();
         if (underruns != reported){
             reported = underruns;
@@ -110,7 +118,7 @@ static void driver_timer_handler_sink(btstack_timer_source_t * ts){
         }
     }
 
-    btstack_run_loop_set_timer(ts, DRIVER_POLL_INTERVAL_MS);
+    btstack_run_loop_set_timer(ts, poll_interval_ms);
     btstack_run_loop_add_timer(ts);
 }
 
@@ -146,8 +154,11 @@ static void btstack_audio_pico_sink_start_stream(void){
     sink_active = true;
     audio_out_start(&sink_fill, NULL);
 
+    // the rate is fixed until the stream stops, and with it the deadline
+    poll_interval_ms = audio_out_service_interval_ms();
+
     btstack_run_loop_set_timer_handler(&driver_timer_sink, &driver_timer_handler_sink);
-    btstack_run_loop_set_timer(&driver_timer_sink, DRIVER_POLL_INTERVAL_MS);
+    btstack_run_loop_set_timer(&driver_timer_sink, poll_interval_ms);
     btstack_run_loop_add_timer(&driver_timer_sink);
 }
 

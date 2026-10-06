@@ -54,7 +54,7 @@ typedef void (*audio_out_fill_fn)(int32_t * dst, uint32_t num_frames, void * con
 /// here on the DAC is fed continuously, silence included, so it never has to
 /// re-acquire. Idempotent: once running, sample_rate is ignored and
 /// audio_out_set_sample_rate() is the way to change it. False, claiming
-/// nothing, if clk_sys cannot be divided down to sample_rate.
+/// nothing, if audio_out_set_sample_rate() would refuse sample_rate.
 bool audio_out_init(uint32_t sample_rate);
 
 /// Reprograms the clocks for a new rate. Only between streams - the contract
@@ -66,8 +66,9 @@ bool audio_out_init(uint32_t sample_rate);
 /// The PIO divider is 16.8 fixed point, so the achieved rate is close to, not
 /// exactly, the one asked for; it is printed with its error in ppm. True
 /// without touching anything if the rate is already the current one. False,
-/// changing nothing, if a stream is running, audio_out_init() has not run, or
-/// the divider is out of range.
+/// changing nothing, if a stream is running, audio_out_init() has not run, the
+/// rate is above PICO_AUDIO_I2S_MAX_SAMPLE_RATE, or the divider is out of
+/// range.
 bool audio_out_set_sample_rate(uint32_t sample_rate);
 
 /// The rate last programmed, 0 before audio_out_init().
@@ -81,10 +82,17 @@ void audio_out_start(audio_out_fill_fn fill, void * context);
 void audio_out_stop(void);
 
 /// Refills whatever the DMA has consumed. Call at least twice per buffer
-/// period; audio_out_frames_per_buffer() says how long that is.
+/// period; audio_out_service_interval_ms() says how often that is.
 void audio_out_service(void);
 
+/// Frames in each buffer at the current rate. Buffers are sized in time
+/// (PICO_AUDIO_I2S_BUFFER_US), so this follows the rate while the buffer
+/// period stays put.
 uint32_t audio_out_frames_per_buffer(void);
+
+/// The longest a caller may leave between audio_out_service() calls at the
+/// current rate: half a buffer period, at least 1ms.
+uint32_t audio_out_service_interval_ms(void);
 
 /// Audio held between accepting a frame and the DAC clocking it out.
 uint32_t audio_out_latency_us(uint32_t sample_rate);
