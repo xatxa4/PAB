@@ -26,8 +26,7 @@ add_executable(${PROJECT_NAME})
 # only the PIO programs are used from pico_i2s_pio, not its queue/DMA layer
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/pico_i2s_pio/i2s.pio)
 
-target_sources(${PROJECT_NAME} PRIVATE
-    ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
+set(PAB_SOURCES
     src/audio_out.c
     src/app_mode.c
     src/btstack_audio_pico_i2s.c
@@ -39,6 +38,30 @@ target_sources(${PROJECT_NAME} PRIVATE
     src/a2dp.c
     src/avrcp.c
 )
+
+target_sources(${PROJECT_NAME} PRIVATE
+    ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
+    ${PAB_SOURCES}
+)
+
+# Warnings for our own files only. The SDK's libraries are INTERFACE libraries
+# that compile into this target too, and their warnings are not ours to fix.
+set_source_files_properties(${PAB_SOURCES} PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
+
+# Stamp the binary with the tree it was built from. Runs on every build, not
+# just at configure time, and rewrites the header only when the result changes,
+# so it never goes stale and never forces a rebuild by itself.
+set(PAB_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_custom_target(pab_version
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_LIST_DIR}
+        -DOUTPUT=${PAB_GENERATED_DIR}/pab_version.h
+        -P ${CMAKE_CURRENT_LIST_DIR}/cmake/pab_version.cmake
+    BYPRODUCTS ${PAB_GENERATED_DIR}/pab_version.h
+    COMMENT "Stamping git version"
+    VERBATIM
+)
+add_dependencies(${PROJECT_NAME} pab_version)
 
 # Same wiring as usb_sound_card_hires: i2s_mclk_set_pin(18, 20, 22)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -82,6 +105,7 @@ target_link_libraries(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR} # For btstack config
+    ${PAB_GENERATED_DIR}      # pab_version.h
 )
 
 if (PAB_STDIO STREQUAL "usb")

@@ -41,6 +41,7 @@
  */
 
 #include "pico/stdlib.h"
+#include "pico/binary_info.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
 
@@ -48,6 +49,11 @@
 #include "bt.h"
 #include "mode_button.h"
 #include "usb_dac.h"
+#include "pab_version.h"
+
+// `picotool info` reads this off a .uf2 before it is flashed, which settles
+// whether a binary contains a fix without having to boot it.
+bi_decl(bi_program_version_string(PAB_GIT_VERSION));
 
 
 // Unrecoverable error happened. Reboot by setting watchdog.
@@ -104,6 +110,8 @@ static void bt_sink_run(void) {
 
 int main() {
     stdio_init_all();
+
+    printf("PAB             : %s\n", PAB_GIT_VERSION);
 
     app_mode_t mode = app_mode_current();
     printf("MODE            : %s\n", app_mode_name(mode));
