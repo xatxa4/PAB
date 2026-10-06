@@ -47,6 +47,7 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/structs/bus_ctrl.h"   // the name SDK 1.5 and 2.x share
 
 #include "i2s.pio.h"
 
@@ -218,7 +219,16 @@ static void i2s_start(uint32_t sample_rate){
     }
 
     irq_add_shared_handler(DMA_IRQ_0, i2s_dma_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    // At the default priority the refill ranks equal with the CYW43 GPIO IRQ
+    // and waits behind it at a buffer boundary. Nothing else uses DMA_IRQ_0 -
+    // the CYW43 bus polls its DMA - so anything sharing it later must be as
+    // short as this handler.
+    irq_set_priority(DMA_IRQ_0, PICO_HIGHEST_IRQ_PRIORITY);
     irq_set_enabled(DMA_IRQ_0, true);
+
+    // DMA ahead of the processors on the bus, so a busy core cannot hold off
+    // the transfers feeding the PIO FIFO
+    hw_set_bits(&bus_ctrl_hw->priority, BUSCTRL_BUS_PRIORITY_DMA_R_BITS | BUSCTRL_BUS_PRIORITY_DMA_W_BITS);
 
     // clocks run from here on, feeding silence whenever nothing is streaming,
     // so the DAC never has to re-acquire between tracks
