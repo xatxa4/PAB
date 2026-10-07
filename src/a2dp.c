@@ -626,7 +626,9 @@ void a2dp_sink_begin() {
     a2dp_sink_register_packet_handler(&data_handler);
     a2dp_sink_register_media_handler(&media_handler);
 
-    uint8_t sbc_configuration[4];
+    // BTstack keeps this pointer and copies every configuration the source
+    // sets into it, long after this function has returned - so not the stack.
+    static uint8_t sbc_configuration[4];
     avdtp_stream_endpoint_t * endpoint = a2dp_sink_create_stream_endpoint(AVDTP_AUDIO, AVDTP_CODEC_SBC, 
         _sbc_capabilities, sizeof(_sbc_capabilities),
         sbc_configuration, sizeof(sbc_configuration));
