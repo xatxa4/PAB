@@ -36,6 +36,8 @@ the tree the list was written against, before the fixes.
 | 1.3 Rate-change contract | **Done** | `6e9acaf` |
 | 1.2 Buffers sized in time | **Done** | `f9ebacc` |
 | `PAB_STDIO` linked UART stdio into every build (found on the way, not in the list below) | **Done** | `952d688` |
+| 0.4 AVDTP delay report: value, timing, tracking (found later) | **Done** | `9e76e01`…`f893ae5` |
+| 0.5 Codec configuration buffer on the stack (found later) | **Done** | `f42bc52` |
 | 1.1 Mode descriptor | Open — next | |
 | 1.5 Fault handler, watchdog | Open — after 1.1 | |
 | 1.6 Display off the audio thread | Open — no display code yet | |
@@ -156,6 +158,52 @@ is kept honest. Assert it rather than hoping.
 > a static assertion requires room for the target depth plus one maximal
 > packet (15 frames) of the largest frame. The old value fails it. The ring is
 > 15.7 KB.
+
+---
+
+### 0.4 The delay report put sound ~45 ms ahead of the picture
+
+Added after the list was written. PAB advertises AVDTP Delay Reporting, so a
+source that honours it (Android 9+, Android/Google/Fire TV, iOS 8.2+, Linux
+with PipeWire) holds its video back by what the sink reports. Three things were
+wrong with what it reported:
+
+- **The value.** It added the four I2S buffers on top of the 30 SBC frames
+  playback waits for, but those buffers are filled *from* the same frames: 133.5
+  ms reported against ~90 ms real at 44.1 kHz. Sound ahead of picture is the
+  direction viewers notice first, and ITU-R BT.1359 puts the threshold at 45 ms.
+- **The timing.** One report, after START. Sink stacks send it in the configured
+  state, before OPEN; Android (behind a flag) waits up to 2 s for it there, an
+  ESP-IDF source 5 s. It was also sent whether or not the source had switched
+  Delay Reporting on.
+- **Never updated.** The resampler leaves the ring anywhere in 20–40 frames, so
+  the real latency wanders across ~50 ms with clock drift and after dropouts.
+
+> **Adopted** (`9e76e01`, `938f8dd`, `bc1e60b`, `e611144`, plus review fixes
+> `44efbc2`, `46ab771`, `2bd9f74`, `f893ae5`). The first report is an estimate of
+> what is actually queued (90.0 ms at 44.1 kHz, 84.1 at 48), sent in the
+> configured state when the source configures us and at STREAM_ESTABLISHED when
+> BTstack configures the source, and only if the source switched Delay
+> Reporting on. While playing, the real latency of each packet is measured
+> (SBC frames ahead of it, decoded audio, and `audio_out_queued_frames()`),
+> averaged over a second, and re-reported when it moves by 5 ms, at most once a
+> second. Reports are clamped to 101–1000 ms: Android 9 discards 100 ms or less.
+> Two BTstack behaviours are worked around: it never switches Delay Reporting on
+> when it configures the source itself, and a RECONFIGURE clears the bit. A
+> rejected report no longer leaves BTstack's A2DP layer deaf to START. The log
+> shows `latency estimate`, `latency measured` and `delay report` lines.
+>
+> Samsung, LG, Roku and Apple TV: no evidence either way that they act on the
+> report. Their manual A/V-sync settings remain the fallback.
+
+### 0.5 The codec configuration buffer lived on the stack
+
+Also found later. `a2dp_sink_begin()` passed a 4-byte local array to
+`a2dp_sink_create_stream_endpoint()`, which keeps the pointer (`a2dp_sink.c:116`)
+and copies every SET_CONFIGURATION into it long after setup has returned — 4
+bytes into whatever frame of the run loop's call chain sat there.
+
+> **Adopted** (`f42bc52`): the buffer is static, as in BTstack's own demo.
 
 ---
 
