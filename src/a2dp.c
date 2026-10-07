@@ -609,6 +609,17 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             break;
         }
 
+        case A2DP_SUBEVENT_SIGNALING_DELAY_REPORTING_CAPABILITY:
+            // When BTstack configures the source itself, it decides on Delay
+            // Reporting at the SBC capability, which arrives before this one,
+            // so it never switches it on. Do it here, for the SEP it picked:
+            // SET_CONFIGURATION only goes out once all capabilities are in.
+            if ((_endpoint != NULL) && (_endpoint->set_config_remote_seid != 0) &&
+                (a2dp_subevent_signaling_delay_reporting_capability_get_remote_seid(packet) == _endpoint->set_config_remote_seid)){
+                _endpoint->remote_configuration_bitmap |= (uint16_t) (1u << AVDTP_DELAY_REPORTING);
+            }
+            break;
+
         case A2DP_SUBEVENT_STREAM_ESTABLISHED:
             status = a2dp_subevent_stream_established_get_status(packet);
             if (status != ERROR_CODE_SUCCESS){
