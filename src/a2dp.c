@@ -90,8 +90,10 @@
 
 // AVDTP delay reports are in units of 100us. Android 9 discards anything not
 // above 100ms and falls back to its own guess of about 200ms, which would put
-// the sound a tenth of a second ahead of the picture. Clamping to 101ms costs
-// other sources at most ~15ms of sound-early, inside what anyone notices.
+// the sound a tenth of a second ahead of the picture. Our real latency often
+// sits below 101ms, so the floor costs other sources up to ~20ms (44.1kHz) or
+// ~25ms (48kHz) of sound-early - inside the 45ms where viewers notice - and
+// ~50ms for the seconds it takes to rebuild after the SBC ring has run dry.
 // Apple asks for at most 1000ms, and Android ignores more than that.
 #define DELAY_REPORT_MIN_100US 1010
 #define DELAY_REPORT_MAX_100US 10000
