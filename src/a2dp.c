@@ -172,6 +172,7 @@ static uint16_t _delay_sent;            // last value sent for this configuratio
 static uint32_t _delay_sent_ms;
 static bool     _delay_sent_once;       // on this connection, for the rate limit
 static bool     _delay_rejected;        // the source refused one: send no more
+static bool     _delay_reporting;       // the source switched Delay Reporting on
 
 // latency measured while playing, in frames, summed over one window
 static uint64_t _latency_sum;
@@ -322,8 +323,7 @@ static uint16_t delay_report_value(uint32_t delay_us) {
 // reports. Sending one it did not ask for is out of spec, and a source that
 // rejects it leaves BTstack's A2DP layer thinking the stream is gone.
 static bool delay_reporting_enabled(void) {
-    return (_endpoint != NULL) && !_delay_rejected &&
-           ((_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0);
+    return _delay_reporting && !_delay_rejected;
 }
 
 
@@ -603,6 +603,14 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // STREAM_ESTABLISHED.
             _cid = a2dp_subevent_signaling_media_codec_sbc_configuration_get_a2dp_cid(packet);
             delay_report_reset();
+
+            // Decided by SET_CONFIGURATION, already parsed into remote_sep in
+            // both flows. A RECONFIGURE may only carry the codec, and BTstack
+            // overwrites the field with that, so it is read once here.
+            if (!_sbc_configuration.reconfigure){
+                _delay_reporting = (_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0;
+            }
+
             if (_endpoint->state == AVDTP_STREAM_ENDPOINT_CONFIGURATION_SUBSTATEMACHINE){
                 delay_report_initial();
             }
@@ -669,6 +677,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             delay_report_reset();
             _delay_sent_once = false;
             _delay_rejected  = false;
+            _delay_reporting = false;
             media_processing_close();
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
