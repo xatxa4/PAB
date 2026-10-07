@@ -622,6 +622,25 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             break;
         }
 
+        case A2DP_SUBEVENT_SIGNALING_CONNECTION_ESTABLISHED:
+            // A new source: start it clean. BTstack only resets the endpoint
+            // when a configured stream is released, so a configuration of ours
+            // that failed before the accept would leave the Delay Reporting
+            // bit set below, and that source's SEP seid, for the next source -
+            // which would then be configured with Delay Reporting it may never
+            // have offered, and a strict one rejects that. One connection at a
+            // time, so this endpoint is all there is.
+            if (a2dp_subevent_signaling_connection_established_get_status(packet) != ERROR_CODE_SUCCESS) break;
+            if (_endpoint != NULL){
+                _endpoint->remote_configuration_bitmap &= (uint16_t) ~(1u << AVDTP_DELAY_REPORTING);
+                _endpoint->set_config_remote_seid = 0;
+            }
+            delay_report_reset();
+            _delay_sent_once = false;
+            _delay_rejected  = false;
+            _delay_reporting = false;
+            break;
+
         case A2DP_SUBEVENT_SIGNALING_DELAY_REPORTING_CAPABILITY:
             // When BTstack configures the source itself, it decides on Delay
             // Reporting at the SBC capability, which arrives before this one,
