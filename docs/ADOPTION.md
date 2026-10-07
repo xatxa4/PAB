@@ -36,7 +36,7 @@ the tree the list was written against, before the fixes.
 | 1.3 Rate-change contract | **Done** | `6e9acaf` |
 | 1.2 Buffers sized in time | **Done** | `f9ebacc` |
 | `PAB_STDIO` linked UART stdio into every build (found on the way, not in the list below) | **Done** | `952d688` |
-| 0.4 AVDTP delay report: value, timing, tracking (found later) | **Done** | `9e76e01`…`f893ae5` |
+| 0.4 AVDTP delay report: value, timing, tracking (found later) | **Done** | `9e76e01`…`c37cfa9` |
 | 0.5 Codec configuration buffer on the stack (found later) | **Done** | `f42bc52` |
 | 1.1 Mode descriptor | Open — next | |
 | 1.5 Fault handler, watchdog | Open — after 1.1 | |
@@ -180,7 +180,7 @@ wrong with what it reported:
   the real latency wanders across ~50 ms with clock drift and after dropouts.
 
 > **Adopted** (`9e76e01`, `938f8dd`, `bc1e60b`, `e611144`, plus review fixes
-> `44efbc2`, `46ab771`, `2bd9f74`, `f893ae5`). The first report is an estimate of
+> `44efbc2`, `46ab771`, `2bd9f74`, `f893ae5`, `ae4294e`, `c37cfa9`). The first report is an estimate of
 > what is actually queued (90.0 ms at 44.1 kHz, 84.1 at 48), sent in the
 > configured state when the source configures us and at STREAM_ESTABLISHED when
 > BTstack configures the source, and only if the source switched Delay
@@ -188,8 +188,10 @@ wrong with what it reported:
 > (SBC frames ahead of it, decoded audio, and `audio_out_queued_frames()`),
 > averaged over a second, and re-reported when it moves by 5 ms, at most once a
 > second. Reports are clamped to 101–1000 ms: Android 9 discards 100 ms or less.
-> Two BTstack behaviours are worked around: it never switches Delay Reporting on
-> when it configures the source itself, and a RECONFIGURE clears the bit. A
+> Three BTstack behaviours are worked around: it never switches Delay Reporting
+> on when it configures the source itself, a RECONFIGURE clears the bit, and a
+> configuration that fails before the accept leaves its state on the endpoint
+> for the next source. A
 > rejected report no longer leaves BTstack's A2DP layer deaf to START. The log
 > shows `latency estimate`, `latency measured` and `delay report` lines.
 >
