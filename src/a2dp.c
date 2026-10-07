@@ -446,7 +446,10 @@ static void measure_delay(unsigned packet_frames) {
     if (!_audio_stream_started || (rate == 0) || (samples_per_frame == 0) || (_sbc_frame_size == 0)) return;
     if ((_cid == 0) || !delay_reporting_enabled()) return;
 
-    uint32_t sbc_frames = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    // rounded up: after a bitpool change the reads no longer line up with
+    // frames, and the decoder holds a partly consumed one outside the ring
+    uint32_t sbc_bytes  = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer);
+    uint32_t sbc_frames = (sbc_bytes + _sbc_frame_size - 1) / _sbc_frame_size;
     uint32_t ahead      = (sbc_frames > packet_frames) ? (sbc_frames - packet_frames) : 0;
     uint32_t frames     = ahead * samples_per_frame
                         + btstack_ring_buffer_bytes_available(&_decoded_audio_ring_buffer) / BYTES_PER_FRAME
