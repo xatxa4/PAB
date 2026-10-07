@@ -166,6 +166,7 @@ static uint16_t _delay_pending;         // value waiting to go out, 0 if none
 static uint16_t _delay_sent;            // last value sent for this configuration, 0 if none
 static uint32_t _delay_sent_ms;
 static bool     _delay_sent_once;       // on this connection, for the rate limit
+static bool     _delay_rejected;        // the source refused one: send no more
 static uint8_t  _delay_attempts;
 
 
@@ -310,7 +311,7 @@ static uint16_t delay_report_value(uint32_t delay_us) {
 // reports. Sending one it did not ask for is out of spec, and a source that
 // rejects it leaves BTstack's A2DP layer thinking the stream is gone.
 static bool delay_reporting_enabled(void) {
-    return (_endpoint != NULL) &&
+    return (_endpoint != NULL) && !_delay_rejected &&
            ((_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0);
 }
 
@@ -382,6 +383,24 @@ static void delay_report_reset(void) {
     btstack_run_loop_remove_timer(&_delay_timer);
     _delay_pending = 0;
     _delay_sent    = 0;
+}
+
+
+// A source that switched Delay Reporting on and then rejects a report is
+// broken, but the damage lands here: BTstack's A2DP layer answers any reject
+// of a command of ours by dropping its stream state to CONNECTED, and from then
+// on never forwards START or SUSPEND - and on SDK 1.5.1 never STREAM_ESTABLISHED
+// either - so the speaker goes quiet until the next connection. Put back the
+// state it was in, and stop reporting to this source.
+static void delay_report_rejected(uint16_t cid) {
+    printf("A2DP  Sink      : source rejected the delay report, sending no more\n");
+    _delay_rejected = true;
+    delay_report_reset();
+
+    avdtp_connection_t * connection = avdtp_get_connection_for_avdtp_cid(cid);
+    if ((connection == NULL) || (connection->a2dp_sink_config_process.state != A2DP_CONNECTED)) return;
+    connection->a2dp_sink_config_process.state =
+        (_stream_state == STREAM_STATE_CLOSED) ? A2DP_W4_OPEN_STREAM_WITH_SEID : A2DP_STREAMING_OPENED;
 }
 
 
@@ -579,6 +598,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _cid = 0;
             delay_report_reset();
             _delay_sent_once = false;
+            _delay_rejected  = false;
             media_processing_close();
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
@@ -586,6 +606,13 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             watchdog_enable(100, true);  // reboot in 0.1s, since reconnect is buggy
             break;
         
+        case A2DP_SUBEVENT_COMMAND_REJECTED:
+            // BTstack only forwards rejects of commands we sent
+            if (a2dp_subevent_command_rejected_get_signal_identifier(packet) == AVDTP_SI_DELAYREPORT){
+                delay_report_rejected(a2dp_subevent_command_rejected_get_a2dp_cid(packet));
+            }
+            break;
+
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
             // printf("A2DP  Sink      : Signaling connection released\n");
             // _cid = 0;
