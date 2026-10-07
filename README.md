@@ -58,6 +58,16 @@ Every build is stamped with `git describe --dirty`. It is printed at boot, and
 What to work on next, and why in that order, is in
 [`docs/ADOPTION.md`](docs/ADOPTION.md).
 
+## Lip sync
+
+PAB tells the source how far behind the picture its audio is (AVDTP delay
+reporting), measured from what is actually queued and updated while it plays.
+Sources that use it hold their video back to match: Android 9 and later,
+including Android, Google and Fire TV; iOS 8.2 and later; Linux with PipeWire.
+Many TVs — Samsung, LG, Roku, Apple TV among them — may not, and need their
+manual audio/video sync setting instead; about 90–100 ms is the place to start.
+The console shows `latency measured` and `delay report` lines while streaming.
+
 ---
 
 # Licensing

@@ -187,6 +187,10 @@ const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void){
     return &btstack_audio_pico_sink;
 }
 
-uint32_t btstack_audio_pico_sink_latency_us(uint32_t sample_rate){
-    return audio_out_latency_us(sample_rate);
+uint32_t btstack_audio_pico_sink_buffer_us(uint32_t sample_rate){
+    return audio_out_buffer_us(sample_rate);
+}
+
+uint32_t btstack_audio_pico_sink_queued_frames(void){
+    return audio_out_queued_frames();
 }

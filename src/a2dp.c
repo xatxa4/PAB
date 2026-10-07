@@ -61,6 +61,9 @@
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
 
+// Playback starts once this many SBC frames are queued.
+#define START_FRAMES       ((OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2)
+
 // Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
 // burst. A full ring refuses a whole packet, and a packet carries up to 15
 // frames, so this must hold at least one maximal packet on top of the target
@@ -84,6 +87,32 @@
 // (119), so a dual channel stream - SBC XQ - overran the stack buffer in
 // playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
 #define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
+
+// AVDTP delay reports are in units of 100us. Android 9 discards anything not
+// above 100ms and falls back to its own guess of about 200ms, which would put
+// the sound a tenth of a second ahead of the picture. Our real latency often
+// sits below 101ms, so the floor costs other sources up to ~20ms (44.1kHz) or
+// ~25ms (48kHz) of sound-early - inside the 45ms where viewers notice - and
+// ~50ms for the seconds it takes to rebuild after the SBC ring has run dry.
+// Apple asks for at most 1000ms, and Android ignores more than that.
+#define DELAY_REPORT_MIN_100US 1010
+#define DELAY_REPORT_MAX_100US 10000
+
+// A typical packet. Before any audio has arrived there is nothing better, and
+// it moves the estimate by a frame or two at most.
+#define ASSUMED_FRAMES_PER_PACKET 5
+
+// A delay report is an AVDTP command of our own, so it waits for BTstack: the
+// endpoint configured, and no other command of ours in flight. Apple asks for
+// no more than one a second.
+#define DELAY_REPORT_INTERVAL_MS  1000
+#define DELAY_REPORT_RETRY_MS     10
+#define DELAY_REPORT_ATTEMPTS     50
+
+// While playing, the measured latency is averaged over DELAY_REPORT_INTERVAL_MS
+// and re-reported when it has moved by this much (100us units). The resampler
+// lets it wander across ~50ms with clock drift and after dropouts.
+#define DELAY_REPORT_STEP_100US   50
 
 
 typedef struct {
@@ -115,6 +144,7 @@ static const uint8_t _sbc_capabilities[] = {
 };
 uint8_t _seid = 0;
 uint16_t _cid = 0;
+static avdtp_stream_endpoint_t * _endpoint;
 stream_state_t _stream_state = STREAM_STATE_CLOSED;
 sbc_configuration_t _sbc_configuration = {0};
 btstack_sbc_decoder_state_t _state = {0};
@@ -137,6 +167,21 @@ int _request_frames = 0;
 static uint32_t _sbc_frames_dropped;    // SBC ring full
 static uint32_t _pcm_frames_dropped;    // decoded PCM ring full
 static uint32_t _sbc_frames_rejected;   // larger than MAX_SBC_FRAME_SIZE
+
+static btstack_timer_source_t _delay_timer;
+static uint16_t _delay_pending;         // value waiting to go out, 0 if none
+static uint16_t _delay_sent;            // last value sent for this configuration, 0 if none
+static uint32_t _delay_sent_ms;
+static bool     _delay_sent_once;       // on this connection, for the rate limit
+static bool     _delay_rejected;        // the source refused one: send no more
+static bool     _delay_reporting;       // the source switched Delay Reporting on
+
+// latency measured while playing, in frames, summed over one window
+static uint64_t _latency_sum;
+static uint32_t _latency_count;
+static uint32_t _latency_window_ms;
+static bool     _latency_reported;      // since playback last started
+static uint8_t  _delay_attempts;
 
 
 // send decoded frames to the i2s buffer or ringbuffer. Volume is applied by the
@@ -250,18 +295,190 @@ static void media_processing_init(sbc_configuration_t * configuration) {
 }
 
 
+// How long the first sample of a packet waits before it plays, estimated
+// before any audio has arrived. Playback starts with START_FRAMES queued, and
+// the output buffers are filled from those frames, not on top of them - the
+// old figure counted them twice and came out ~45ms high, enough to put sound
+// noticeably ahead of the picture. What lies ahead of the newest packet is the
+// rest of those frames, plus the silence the DMA was already playing: one
+// buffer queued and, on average, half of the one in flight.
+static uint32_t estimated_delay_us(void) {
+    uint32_t rate              = _sbc_configuration.sampling_frequency;
+    uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if ((rate == 0) || (samples_per_frame == 0)) return 0;
+
+    uint32_t frames_ahead = START_FRAMES - ASSUMED_FRAMES_PER_PACKET;
+    uint32_t ahead_us     = (uint32_t) (((uint64_t) frames_ahead * samples_per_frame * 1000000u) / rate);
+    return ahead_us + 3 * btstack_audio_pico_sink_buffer_us(rate) / 2;
+}
+
+
+static uint16_t delay_report_value(uint32_t delay_us) {
+    uint32_t value = delay_us / 100;
+    if (value < DELAY_REPORT_MIN_100US) value = DELAY_REPORT_MIN_100US;
+    if (value > DELAY_REPORT_MAX_100US) value = DELAY_REPORT_MAX_100US;
+    return (uint16_t) value;
+}
+
+
+// The source switches Delay Reporting on in SET_CONFIGURATION if it wants
+// reports. Sending one it did not ask for is out of spec, and a source that
+// rejects it leaves BTstack's A2DP layer thinking the stream is gone.
+static bool delay_reporting_enabled(void) {
+    return _delay_reporting && !_delay_rejected;
+}
+
+
+static void delay_report_timer_handler(btstack_timer_source_t * ts);
+
+static void delay_report_schedule(uint32_t delay_ms) {
+    btstack_run_loop_remove_timer(&_delay_timer);
+    btstack_run_loop_set_timer_handler(&_delay_timer, &delay_report_timer_handler);
+    btstack_run_loop_set_timer(&_delay_timer, delay_ms);
+    btstack_run_loop_add_timer(&_delay_timer);
+}
+
+
 // Tell the source how far behind we are so it can delay the video to match,
-// rather than us shrinking buffers and hoping. Counts the SBC frames the
-// resampler aims to keep queued plus everything already handed to the sink.
-static void report_delay(void) {
-    uint32_t sample_rate = _sbc_configuration.sampling_frequency;
-    if ((_cid == 0) || (sample_rate == 0)) return;
+// rather than us shrinking buffers and hoping. Goes out as soon as BTstack
+// and the rate limit allow.
+static void delay_report_request(uint16_t value) {
+    if (value == _delay_sent) {
+        _delay_pending = 0;         // the source already has it; drop anything older
+        return;
+    }
+    _delay_pending  = value;
+    _delay_attempts = 0;
+    // not from here: this runs inside BTstack's event dispatch, where the
+    // accept that makes the endpoint CONFIGURED may not have gone out yet
+    delay_report_schedule(1);
+}
 
-    uint32_t sbc_frames = (OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2;
-    uint32_t queued_us  = (uint32_t) (((uint64_t) sbc_frames * 128 * 1000000u) / sample_rate);
-    uint32_t total_us   = queued_us + btstack_audio_pico_sink_latency_us(sample_rate);
 
-    avdtp_sink_delay_report(_cid, _seid, (uint16_t) (total_us / 100));
+static void delay_report_timer_handler(btstack_timer_source_t * ts) {
+    UNUSED(ts);
+    if (_delay_pending == 0) return;
+    if ((_cid == 0) || !delay_reporting_enabled()) {
+        _delay_pending = 0;
+        return;
+    }
+
+    uint32_t now   = btstack_run_loop_get_time_ms();
+    uint32_t since = now - _delay_sent_ms;
+    if (_delay_sent_once && (since < DELAY_REPORT_INTERVAL_MS)) {
+        delay_report_schedule(DELAY_REPORT_INTERVAL_MS - since);
+        return;
+    }
+
+    uint8_t status = avdtp_sink_delay_report(_cid, _seid, _delay_pending);
+    if ((status == ERROR_CODE_COMMAND_DISALLOWED) && (++_delay_attempts < DELAY_REPORT_ATTEMPTS)) {
+        // endpoint not CONFIGURED yet, or another command of ours in flight
+        delay_report_schedule(DELAY_REPORT_RETRY_MS);
+        return;
+    }
+    if (status != ERROR_CODE_SUCCESS) {
+        printf("A2DP  Sink      : delay report not sent, status 0x%02x\n", status);
+        _delay_pending = 0;
+        return;
+    }
+
+    printf("A2DP  Sink      : delay report %u.%u ms\n",
+           (unsigned) (_delay_pending / 10), (unsigned) (_delay_pending % 10));
+    _delay_sent      = _delay_pending;
+    _delay_sent_ms   = now;
+    _delay_sent_once = true;
+    _delay_pending   = 0;
+}
+
+
+// A new configuration: whatever the source was told before no longer holds.
+static void delay_report_reset(void) {
+    btstack_run_loop_remove_timer(&_delay_timer);
+    _delay_pending = 0;
+    _delay_sent    = 0;
+}
+
+
+// A source that switched Delay Reporting on and then rejects a report is
+// broken, but the damage lands here: BTstack's A2DP layer answers any reject
+// of a command of ours by dropping its stream state to CONNECTED, and from then
+// on never forwards START or SUSPEND - and on SDK 1.5.1 never STREAM_ESTABLISHED
+// either - so the speaker goes quiet until the next connection. Put back the
+// state it was in, and stop reporting to this source.
+static void delay_report_rejected(uint16_t cid) {
+    printf("A2DP  Sink      : source rejected the delay report, sending no more\n");
+    _delay_rejected = true;
+    delay_report_reset();
+
+    avdtp_connection_t * connection = avdtp_get_connection_for_avdtp_cid(cid);
+    if ((connection == NULL) || (connection->a2dp_sink_config_process.state != A2DP_CONNECTED)) return;
+    connection->a2dp_sink_config_process.state =
+        (_stream_state == STREAM_STATE_CLOSED) ? A2DP_W4_OPEN_STREAM_WITH_SEID : A2DP_STREAMING_OPENED;
+}
+
+
+// The first report of a configuration, before there is audio to measure.
+static void delay_report_initial(void) {
+    if (!delay_reporting_enabled()) return;
+    if ((_delay_sent != 0) || (_delay_pending != 0)) return;
+
+    uint32_t estimate_us = estimated_delay_us();
+    if (estimate_us == 0) return;
+
+    printf("A2DP  Sink      : latency estimate %lu.%lu ms\n",
+           (unsigned long) (estimate_us / 1000), (unsigned long) (estimate_us % 1000 / 100));
+    delay_report_request(delay_report_value(estimate_us));
+}
+
+
+static void measure_delay_restart(void) {
+    _latency_sum      = 0;
+    _latency_count    = 0;
+    _latency_reported = false;
+}
+
+
+// What the first sample of the packet just written will wait before it plays:
+// every SBC frame ahead of it in the ring, the decoded audio not yet handed
+// over, and everything the output has queued, silence included. Decoding is
+// pulled by the output, so this is the whole of our latency. Averaged over a
+// second and re-reported when it has moved far enough to matter.
+static void measure_delay(unsigned packet_frames) {
+    uint32_t rate              = _sbc_configuration.sampling_frequency;
+    uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if (!_audio_stream_started || (rate == 0) || (samples_per_frame == 0) || (_sbc_frame_size == 0)) return;
+    if ((_cid == 0) || !delay_reporting_enabled()) return;
+
+    // rounded up: after a bitpool change the reads no longer line up with
+    // frames, and the decoder holds a partly consumed one outside the ring
+    uint32_t sbc_bytes  = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer);
+    uint32_t sbc_frames = (sbc_bytes + _sbc_frame_size - 1) / _sbc_frame_size;
+    uint32_t ahead      = (sbc_frames > packet_frames) ? (sbc_frames - packet_frames) : 0;
+    uint32_t frames     = ahead * samples_per_frame
+                        + btstack_ring_buffer_bytes_available(&_decoded_audio_ring_buffer) / BYTES_PER_FRAME
+                        + btstack_audio_pico_sink_queued_frames();
+
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if (_latency_count == 0) _latency_window_ms = now;
+    _latency_sum += frames;
+    _latency_count++;
+    if ((uint32_t) (now - _latency_window_ms) < DELAY_REPORT_INTERVAL_MS) return;
+
+    uint32_t mean_us = (uint32_t) ((_latency_sum * 1000000u) / ((uint64_t) _latency_count * rate));
+    _latency_sum   = 0;
+    _latency_count = 0;
+
+    uint16_t value  = delay_report_value(mean_us);
+    int      change = (int) value - (int) _delay_sent;
+    bool     moved  = (_delay_sent == 0) || (change >= DELAY_REPORT_STEP_100US) || (change <= -DELAY_REPORT_STEP_100US);
+
+    // once per start regardless, so a log shows what the report rests on
+    if (!moved && _latency_reported) return;
+    _latency_reported = true;
+
+    printf("A2DP  Sink      : latency measured %lu.%lu ms\n",
+           (unsigned long) (mean_us / 1000), (unsigned long) (mean_us % 1000 / 100));
+    if (moved) delay_report_request(value);
 }
 
 
@@ -382,8 +599,59 @@ static void event_handler(uint8_t event, uint8_t *packet) {
                 printf("A2DP  Sink      : SBC frames of up to %u bytes negotiated, only %u fit\n",
                        frame_bytes, (unsigned) MAX_SBC_FRAME_SIZE);
             }
+
+            // The first delay report belongs in the configured state, before
+            // OPEN: some sources hold OPEN until they hear it (Android up to
+            // 2s, ESP-IDF 5s). When the source is configuring us, the endpoint
+            // is still mid-configuration here and the report follows the
+            // accept. When we configured the source, BTstack sends OPEN next
+            // on its own and the report would collide with it, so it waits for
+            // STREAM_ESTABLISHED.
+            _cid = a2dp_subevent_signaling_media_codec_sbc_configuration_get_a2dp_cid(packet);
+            delay_report_reset();
+
+            // Decided by SET_CONFIGURATION, already parsed into remote_sep in
+            // both flows. A RECONFIGURE may only carry the codec, and BTstack
+            // overwrites the field with that, so it is read once here.
+            if (!_sbc_configuration.reconfigure){
+                _delay_reporting = (_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0;
+            }
+
+            if (_endpoint->state == AVDTP_STREAM_ENDPOINT_CONFIGURATION_SUBSTATEMACHINE){
+                delay_report_initial();
+            }
             break;
         }
+
+        case A2DP_SUBEVENT_SIGNALING_CONNECTION_ESTABLISHED:
+            // A new source: start it clean. BTstack only resets the endpoint
+            // when a configured stream is released, so a configuration of ours
+            // that failed before the accept would leave the Delay Reporting
+            // bit set below, and that source's SEP seid, for the next source -
+            // which would then be configured with Delay Reporting it may never
+            // have offered, and a strict one rejects that. One connection at a
+            // time, so this endpoint is all there is.
+            if (a2dp_subevent_signaling_connection_established_get_status(packet) != ERROR_CODE_SUCCESS) break;
+            if (_endpoint != NULL){
+                _endpoint->remote_configuration_bitmap &= (uint16_t) ~(1u << AVDTP_DELAY_REPORTING);
+                _endpoint->set_config_remote_seid = 0;
+            }
+            delay_report_reset();
+            _delay_sent_once = false;
+            _delay_rejected  = false;
+            _delay_reporting = false;
+            break;
+
+        case A2DP_SUBEVENT_SIGNALING_DELAY_REPORTING_CAPABILITY:
+            // When BTstack configures the source itself, it decides on Delay
+            // Reporting at the SBC capability, which arrives before this one,
+            // so it never switches it on. Do it here, for the SEP it picked:
+            // SET_CONFIGURATION only goes out once all capabilities are in.
+            if ((_endpoint != NULL) && (_endpoint->set_config_remote_seid != 0) &&
+                (a2dp_subevent_signaling_delay_reporting_capability_get_remote_seid(packet) == _endpoint->set_config_remote_seid)){
+                _endpoint->remote_configuration_bitmap |= (uint16_t) (1u << AVDTP_DELAY_REPORTING);
+            }
+            break;
 
         case A2DP_SUBEVENT_STREAM_ESTABLISHED:
             status = a2dp_subevent_stream_established_get_status(packet);
@@ -399,6 +667,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _stream_state = STREAM_STATE_OPEN;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             gpio_put(CONN_PIN, 1);
+            delay_report_initial();
 
             // inquiry scan keeps interrupting the ACL link on its own 1.28s
             // cycle, and nobody needs to discover a speaker that is in use
@@ -416,7 +685,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             }
             // prepare media processing
             media_processing_init(&_sbc_configuration);
-            report_delay();
+            delay_report_initial();     // after a reconfigure, nothing else sent one
             // audio stream is started when buffer reaches minimal level
             break;
         
@@ -430,6 +699,10 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // printf("A2DP  Sink      : Stream released\n");
             _stream_state = STREAM_STATE_CLOSED;
             _cid = 0;
+            delay_report_reset();
+            _delay_sent_once = false;
+            _delay_rejected  = false;
+            _delay_reporting = false;
             media_processing_close();
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
@@ -437,6 +710,13 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             watchdog_enable(100, true);  // reboot in 0.1s, since reconnect is buggy
             break;
         
+        case A2DP_SUBEVENT_COMMAND_REJECTED:
+            // BTstack only forwards rejects of commands we sent
+            if (a2dp_subevent_command_rejected_get_signal_identifier(packet) == AVDTP_SI_DELAYREPORT){
+                delay_report_rejected(a2dp_subevent_command_rejected_get_a2dp_cid(packet));
+            }
+            break;
+
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
             // printf("A2DP  Sink      : Signaling connection released\n");
             // _cid = 0;
@@ -564,8 +844,13 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     btstack_resample_set_factor(&_resample_instance, resampling_factor);
 
     // start stream if enough frames buffered
-    if (!_audio_stream_started && sbc_frames_in_buffer >= (OPTIMAL_FRAMES_MIN+OPTIMAL_FRAMES_MAX)/2){
+    if (!_audio_stream_started && sbc_frames_in_buffer >= START_FRAMES){
         media_processing_start();
+        measure_delay_restart();
+    }
+
+    if (status == ERROR_CODE_SUCCESS){
+        measure_delay(sbc_header.num_frames);
     }
 }
 
@@ -584,14 +869,16 @@ void a2dp_sink_begin() {
     a2dp_sink_register_packet_handler(&data_handler);
     a2dp_sink_register_media_handler(&media_handler);
 
-    uint8_t sbc_configuration[4];
-    avdtp_stream_endpoint_t * endpoint = a2dp_sink_create_stream_endpoint(AVDTP_AUDIO, AVDTP_CODEC_SBC, 
+    // BTstack keeps this pointer and copies every configuration the source
+    // sets into it, long after this function has returned - so not the stack.
+    static uint8_t sbc_configuration[4];
+    _endpoint = a2dp_sink_create_stream_endpoint(AVDTP_AUDIO, AVDTP_CODEC_SBC,
         _sbc_capabilities, sizeof(_sbc_capabilities),
         sbc_configuration, sizeof(sbc_configuration));
-    _seid = avdtp_local_seid(endpoint);
+    _seid = avdtp_local_seid(_endpoint);
 
-    // lets the source ask for our latency and sync video to it
-    avdtp_sink_register_delay_reporting_category(_seid);
+    // BTstack gives the endpoint the Delay Reporting capability itself, which
+    // is what lets a source turn reports on and sync its video to them.
 }
 
 
