@@ -419,6 +419,7 @@ static void delay_report_rejected(uint16_t cid) {
 
 // The first report of a configuration, before there is audio to measure.
 static void delay_report_initial(void) {
+    if (!delay_reporting_enabled()) return;
     if ((_delay_sent != 0) || (_delay_pending != 0)) return;
 
     uint32_t estimate_us = estimated_delay_us();
