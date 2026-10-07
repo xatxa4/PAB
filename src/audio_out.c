@@ -376,10 +376,9 @@ uint32_t audio_out_service_interval_ms(void){
     return ms ? ms : 1;
 }
 
-uint32_t audio_out_latency_us(uint32_t sample_rate){
+uint32_t audio_out_buffer_us(uint32_t sample_rate){
     if (sample_rate == 0) return 0;
-    uint32_t frames = PICO_AUDIO_I2S_NUM_BUFFERS * FRAMES_FOR_RATE(sample_rate);
-    return (uint32_t) (((uint64_t) frames * 1000000u) / sample_rate);
+    return (uint32_t) (((uint64_t) FRAMES_FOR_RATE(sample_rate) * 1000000u) / sample_rate);
 }
 
 uint32_t audio_out_underruns(void){

@@ -61,6 +61,9 @@
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
 
+// Playback starts once this many SBC frames are queued.
+#define START_FRAMES       ((OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2)
+
 // Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
 // burst. A full ring refuses a whole packet, and a packet carries up to 15
 // frames, so this must hold at least one maximal packet on top of the target
@@ -84,6 +87,18 @@
 // (119), so a dual channel stream - SBC XQ - overran the stack buffer in
 // playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
 #define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
+
+// AVDTP delay reports are in units of 100us. Android 9 discards anything not
+// above 100ms and falls back to its own guess of about 200ms, which would put
+// the sound a tenth of a second ahead of the picture. Clamping to 101ms costs
+// other sources at most ~15ms of sound-early, inside what anyone notices.
+// Apple asks for at most 1000ms, and Android ignores more than that.
+#define DELAY_REPORT_MIN_100US 1010
+#define DELAY_REPORT_MAX_100US 10000
+
+// A typical packet. Before any audio has arrived there is nothing better, and
+// it moves the estimate by a frame or two at most.
+#define ASSUMED_FRAMES_PER_PACKET 5
 
 
 typedef struct {
@@ -250,18 +265,45 @@ static void media_processing_init(sbc_configuration_t * configuration) {
 }
 
 
+// How long the first sample of a packet waits before it plays, estimated
+// before any audio has arrived. Playback starts with START_FRAMES queued, and
+// the output buffers are filled from those frames, not on top of them - the
+// old figure counted them twice and came out ~45ms high, enough to put sound
+// noticeably ahead of the picture. What lies ahead of the newest packet is the
+// rest of those frames, plus the silence the DMA was already playing: one
+// buffer queued and, on average, half of the one in flight.
+static uint32_t estimated_delay_us(void) {
+    uint32_t rate              = _sbc_configuration.sampling_frequency;
+    uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if ((rate == 0) || (samples_per_frame == 0)) return 0;
+
+    uint32_t frames_ahead = START_FRAMES - ASSUMED_FRAMES_PER_PACKET;
+    uint32_t ahead_us     = (uint32_t) (((uint64_t) frames_ahead * samples_per_frame * 1000000u) / rate);
+    return ahead_us + 3 * btstack_audio_pico_sink_buffer_us(rate) / 2;
+}
+
+
+static uint16_t delay_report_value(uint32_t delay_us) {
+    uint32_t value = delay_us / 100;
+    if (value < DELAY_REPORT_MIN_100US) value = DELAY_REPORT_MIN_100US;
+    if (value > DELAY_REPORT_MAX_100US) value = DELAY_REPORT_MAX_100US;
+    return (uint16_t) value;
+}
+
+
 // Tell the source how far behind we are so it can delay the video to match,
-// rather than us shrinking buffers and hoping. Counts the SBC frames the
-// resampler aims to keep queued plus everything already handed to the sink.
+// rather than us shrinking buffers and hoping.
 static void report_delay(void) {
-    uint32_t sample_rate = _sbc_configuration.sampling_frequency;
-    if ((_cid == 0) || (sample_rate == 0)) return;
+    if (_cid == 0) return;
 
-    uint32_t sbc_frames = (OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2;
-    uint32_t queued_us  = (uint32_t) (((uint64_t) sbc_frames * 128 * 1000000u) / sample_rate);
-    uint32_t total_us   = queued_us + btstack_audio_pico_sink_latency_us(sample_rate);
+    uint32_t estimate_us = estimated_delay_us();
+    if (estimate_us == 0) return;
 
-    avdtp_sink_delay_report(_cid, _seid, (uint16_t) (total_us / 100));
+    uint16_t value = delay_report_value(estimate_us);
+    avdtp_sink_delay_report(_cid, _seid, value);
+    printf("A2DP  Sink      : delay report %u.%u ms (estimate %lu.%lu ms)\n",
+           (unsigned) (value / 10), (unsigned) (value % 10),
+           (unsigned long) (estimate_us / 1000), (unsigned long) (estimate_us % 1000 / 100));
 }
 
 
@@ -564,7 +606,7 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     btstack_resample_set_factor(&_resample_instance, resampling_factor);
 
     // start stream if enough frames buffered
-    if (!_audio_stream_started && sbc_frames_in_buffer >= (OPTIMAL_FRAMES_MIN+OPTIMAL_FRAMES_MAX)/2){
+    if (!_audio_stream_started && sbc_frames_in_buffer >= START_FRAMES){
         media_processing_start();
     }
 }

@@ -94,8 +94,9 @@ uint32_t audio_out_frames_per_buffer(void);
 /// current rate: half a buffer period, at least 1ms.
 uint32_t audio_out_service_interval_ms(void);
 
-/// Audio held between accepting a frame and the DAC clocking it out.
-uint32_t audio_out_latency_us(uint32_t sample_rate);
+/// How long one buffer plays at sample_rate. Buffers are sized in time, so this
+/// is PICO_AUDIO_I2S_BUFFER_US to within a frame at any rate.
+uint32_t audio_out_buffer_us(uint32_t sample_rate);
 
 /// Times the DMA found nothing queued and played silence. Non-zero means the
 /// source is not keeping up; zero means a gap came from somewhere else.
