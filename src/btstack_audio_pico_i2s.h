@@ -51,4 +51,8 @@ const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void);
 /// Tracks PICO_AUDIO_I2S_BUFFER_US.
 uint32_t btstack_audio_pico_sink_buffer_us(uint32_t sample_rate);
 
+/// Frames queued in the output ahead of anything handed over now, for
+/// measuring the latency the delay report should carry.
+uint32_t btstack_audio_pico_sink_queued_frames(void);
+
 #endif

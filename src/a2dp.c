@@ -107,6 +107,11 @@
 #define DELAY_REPORT_RETRY_MS     10
 #define DELAY_REPORT_ATTEMPTS     50
 
+// While playing, the measured latency is averaged over DELAY_REPORT_INTERVAL_MS
+// and re-reported when it has moved by this much (100us units). The resampler
+// lets it wander across ~50ms with clock drift and after dropouts.
+#define DELAY_REPORT_STEP_100US   50
+
 
 typedef struct {
     uint8_t  reconfigure;
@@ -167,6 +172,12 @@ static uint16_t _delay_sent;            // last value sent for this configuratio
 static uint32_t _delay_sent_ms;
 static bool     _delay_sent_once;       // on this connection, for the rate limit
 static bool     _delay_rejected;        // the source refused one: send no more
+
+// latency measured while playing, in frames, summed over one window
+static uint64_t _latency_sum;
+static uint32_t _latency_count;
+static uint32_t _latency_window_ms;
+static bool     _latency_reported;      // since playback last started
 static uint8_t  _delay_attempts;
 
 
@@ -414,6 +425,54 @@ static void delay_report_initial(void) {
     printf("A2DP  Sink      : latency estimate %lu.%lu ms\n",
            (unsigned long) (estimate_us / 1000), (unsigned long) (estimate_us % 1000 / 100));
     delay_report_request(delay_report_value(estimate_us));
+}
+
+
+static void measure_delay_restart(void) {
+    _latency_sum      = 0;
+    _latency_count    = 0;
+    _latency_reported = false;
+}
+
+
+// What the first sample of the packet just written will wait before it plays:
+// every SBC frame ahead of it in the ring, the decoded audio not yet handed
+// over, and everything the output has queued, silence included. Decoding is
+// pulled by the output, so this is the whole of our latency. Averaged over a
+// second and re-reported when it has moved far enough to matter.
+static void measure_delay(unsigned packet_frames) {
+    uint32_t rate              = _sbc_configuration.sampling_frequency;
+    uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if (!_audio_stream_started || (rate == 0) || (samples_per_frame == 0) || (_sbc_frame_size == 0)) return;
+    if ((_cid == 0) || !delay_reporting_enabled()) return;
+
+    uint32_t sbc_frames = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    uint32_t ahead      = (sbc_frames > packet_frames) ? (sbc_frames - packet_frames) : 0;
+    uint32_t frames     = ahead * samples_per_frame
+                        + btstack_ring_buffer_bytes_available(&_decoded_audio_ring_buffer) / BYTES_PER_FRAME
+                        + btstack_audio_pico_sink_queued_frames();
+
+    uint32_t now = btstack_run_loop_get_time_ms();
+    if (_latency_count == 0) _latency_window_ms = now;
+    _latency_sum += frames;
+    _latency_count++;
+    if ((uint32_t) (now - _latency_window_ms) < DELAY_REPORT_INTERVAL_MS) return;
+
+    uint32_t mean_us = (uint32_t) ((_latency_sum * 1000000u) / ((uint64_t) _latency_count * rate));
+    _latency_sum   = 0;
+    _latency_count = 0;
+
+    uint16_t value  = delay_report_value(mean_us);
+    int      change = (int) value - (int) _delay_sent;
+    bool     moved  = (_delay_sent == 0) || (change >= DELAY_REPORT_STEP_100US) || (change <= -DELAY_REPORT_STEP_100US);
+
+    // once per start regardless, so a log shows what the report rests on
+    if (!moved && _latency_reported) return;
+    _latency_reported = true;
+
+    printf("A2DP  Sink      : latency measured %lu.%lu ms\n",
+           (unsigned long) (mean_us / 1000), (unsigned long) (mean_us % 1000 / 100));
+    if (moved) delay_report_request(value);
 }
 
 
@@ -742,6 +801,11 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     // start stream if enough frames buffered
     if (!_audio_stream_started && sbc_frames_in_buffer >= START_FRAMES){
         media_processing_start();
+        measure_delay_restart();
+    }
+
+    if (status == ERROR_CODE_SUCCESS){
+        measure_delay(sbc_header.num_frames);
     }
 }
 

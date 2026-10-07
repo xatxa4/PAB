@@ -381,6 +381,35 @@ uint32_t audio_out_buffer_us(uint32_t sample_rate){
     return (uint32_t) (((uint64_t) FRAMES_FOR_RATE(sample_rate) * 1000000u) / sample_rate);
 }
 
+uint32_t audio_out_queued_frames(void){
+    if (!i2s_started) return 0;
+
+    uint32_t saved = save_and_disable_interrupts();
+    uint32_t words = 0;
+
+    for (uint8_t c = 0; c < 2; c++){
+        uint ch = (uint) i2s_dma_chan[c];
+        if (dma_channel_is_busy(ch)){
+            // what is left of the buffer playing
+            words += dma_hw->ch[ch].transfer_count;
+        } else if ((dma_hw->ints0 & (1u << ch)) == 0){
+            // armed behind it by the IRQ; with the IRQ still pending it has
+            // just finished and holds nothing yet
+            words += buffer_frames * 2;
+        }
+    }
+
+    // filled and waiting for a channel
+    for (uint8_t i = 0; i < PICO_AUDIO_I2S_NUM_BUFFERS; i++){
+        if (buffer_ready[i] && (i != chan_buffer[0]) && (i != chan_buffer[1])) words += buffer_frames * 2;
+    }
+
+    words += pio_sm_get_tx_fifo_level(PICO_AUDIO_I2S_PIO, i2s_sm);
+
+    restore_interrupts(saved);
+    return words / 2;
+}
+
 uint32_t audio_out_underruns(void){
     return underrun_count;
 }

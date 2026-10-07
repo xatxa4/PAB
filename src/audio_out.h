@@ -98,6 +98,11 @@ uint32_t audio_out_service_interval_ms(void);
 /// is PICO_AUDIO_I2S_BUFFER_US to within a frame at any rate.
 uint32_t audio_out_buffer_us(uint32_t sample_rate);
 
+/// Frames the DAC will play before anything handed over now: what is left of
+/// the buffer playing, plus every buffer queued behind it, silence included.
+/// The output's share of the latency, as it stands.
+uint32_t audio_out_queued_frames(void);
+
 /// Times the DMA found nothing queued and played silence. Non-zero means the
 /// source is not keeping up; zero means a gap came from somewhere else.
 uint32_t audio_out_underruns(void);
