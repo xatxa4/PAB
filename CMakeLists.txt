@@ -17,6 +17,15 @@ include(pico_sdk_import.cmake)
 
 pico_sdk_init()
 
+# Built and checked against 2.1.1. 1.5.1 still builds, but its CYW43 driver
+# can count a gSPI write finished before its DMA is (fixed in 2.1.1, #2206),
+# and newer SDKs ship a BTstack whose pairing defaults changed.
+if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
+    message(WARNING "PAB is tested with Pico SDK 2.1.1; ${PICO_SDK_VERSION_STRING} lacks CYW43 driver fixes from 2.1.x")
+elseif (PICO_SDK_VERSION_STRING VERSION_GREATER "2.1.1")
+    message(STATUS "PAB is tested with Pico SDK 2.1.1; building with ${PICO_SDK_VERSION_STRING}")
+endif()
+
 project(picow-a2dp CXX C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -79,6 +88,12 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     PICO_AUDIO_I2S_MAX_SAMPLE_RATE=96000
     # RUN_PIN=22
     CONN_PIN=26
+    # The deepest measured path - a packet that starts the stream, decoding
+    # inside the BTstack IRQ with USB and DMA IRQs nested on top - needs ~2.5KB
+    # against the default 2KB reservation. It worked only because nothing sits
+    # below; reserve all of SCRATCH_Y, which nothing else uses, so stack guards
+    # or a future scratch user cannot turn that into a fault. No RAM cost.
+    PICO_STACK_SIZE=0x1000
     BT_PIN="0000"
     BT_NAME="PicoW"
 )
@@ -116,6 +131,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 if (PAB_STDIO STREQUAL "usb")
     pico_enable_stdio_usb(${PROJECT_NAME} 1)
     pico_enable_stdio_uart(${PROJECT_NAME} 0)
+    # printf runs in BTstack's context. With a terminal holding the port open
+    # but not reading, the SDK waits this long for room before dropping output
+    # - 500 ms by default, ten times the audio queued ahead of the DAC.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=10000)
 elseif (PAB_STDIO STREQUAL "uart")
     pico_enable_stdio_usb(${PROJECT_NAME} 0)
     pico_enable_stdio_uart(${PROJECT_NAME} 1)

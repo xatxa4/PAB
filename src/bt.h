@@ -52,6 +52,11 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
 void bt_run();
 
 bool bt_up();
+
+/// False once the controller failed to power on, or dropped out of the working
+/// state after reaching it, or has not reached it within up_deadline_ms of boot.
+/// The watchdog is fed only while this holds.
+bool bt_healthy(uint32_t up_deadline_ms);
 void bt_addr( bd_addr_t local_addr );
 
 #endif

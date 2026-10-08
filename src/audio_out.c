@@ -128,7 +128,19 @@ static uint i2s_mclk_sm;
 static int i2s_dma_chan[2];
 static volatile int8_t chan_buffer[2] = { -1, -1 };   // -1 while playing silence
 
+// A re-triggered channel reloads its transfer count but not its read address,
+// so if the IRQ is a whole buffer late - interrupts are off for the length of
+// every flash write, ~1ms per page and 45-400ms per sector erase, and BTstack
+// writes link keys - the chain carried on reading whatever RAM follows the
+// buffer it last played, and the DAC played BTstack's state at full scale.
+// So each data channel hands over through a one-word control channel that
+// first points it back at silence; the IRQ re-aims it at the next buffer. A
+// late IRQ now costs silence and nothing worse.
+static int i2s_ctrl_chan[2];
+static volatile uint32_t silence_addr;      // read by the control channels: RAM
+
 static volatile uint32_t underrun_count;
+static volatile uint32_t late_count;
 
 // 32 bit stereo frames, interleaved left/right, as the PIO pulls them
 static int32_t audio_buffer[PICO_AUDIO_I2S_NUM_BUFFERS][MAX_BUFFER_WORDS];
@@ -145,13 +157,36 @@ static volatile int32_t volume_gain = AUDIO_OUT_UNITY_GAIN;
 
 static void __time_critical_func(i2s_dma_handler)(void){
     for (uint8_t c = 0; c < 2; c++){
-        if ((dma_hw->ints0 & (1u << i2s_dma_chan[c])) == 0) continue;
-        dma_hw->ints0 = 1u << i2s_dma_chan[c];
+        uint ch = (uint) i2s_dma_chan[c];
+        if ((dma_hw->ints0 & (1u << ch)) == 0) continue;
+        dma_hw->ints0 = 1u << ch;
 
         // this channel is done, so the buffer it just played is free again.
         // The other channel is already playing, started by the chain.
         if (chan_buffer[c] >= 0){
             buffer_ready[chan_buffer[c]] = false;
+        }
+
+        // Its control channel points it back at silence a few cycles after
+        // the completion that raised this IRQ. Let that land before aiming it
+        // at audio, or it would overwrite us. Bounded, so a fault there cannot
+        // hang the IRQ; it only ever takes a cycle or two.
+        bool busy = false;
+        for (uint8_t n = 0; n < 64; n++){
+            busy = dma_channel_is_busy(ch);
+            if (busy || (dma_hw->ch[ch].read_addr == silence_addr)) break;
+        }
+
+        // A whole buffer late: the chain has already restarted this channel,
+        // on the silence its control channel gave it. Leave it playing that;
+        // its next completion arms it as usual. Decided on that one sample of
+        // BUSY: if the restarted channel finishes its silence right now, its
+        // IRQ is raised again, and arming it here would hand a buffer to a
+        // completion that frees it unplayed.
+        if (busy || (dma_hw->ints0 & (1u << ch))){
+            chan_buffer[c] = -1;
+            late_count++;
+            continue;
         }
 
         // load the buffer that comes after the one now playing, ready for the
@@ -170,8 +205,8 @@ static void __time_critical_func(i2s_dma_handler)(void){
             underrun_count++;
         }
 
-        dma_channel_set_read_addr(i2s_dma_chan[c], src, false);
-        dma_channel_set_trans_count(i2s_dma_chan[c], buffer_frames * 2, false);
+        dma_channel_set_read_addr(ch, src, false);
+        dma_channel_set_trans_count(ch, buffer_frames * 2, false);
     }
 }
 
@@ -274,8 +309,11 @@ static void i2s_start(uint32_t sample_rate, uint32_t div_fp8){
 
     program_sample_rate(sample_rate, div_fp8);
 
-    i2s_dma_chan[0] = dma_claim_unused_channel(true);
-    i2s_dma_chan[1] = dma_claim_unused_channel(true);
+    i2s_dma_chan[0]  = dma_claim_unused_channel(true);
+    i2s_dma_chan[1]  = dma_claim_unused_channel(true);
+    i2s_ctrl_chan[0] = dma_claim_unused_channel(true);
+    i2s_ctrl_chan[1] = dma_claim_unused_channel(true);
+    silence_addr     = (uint32_t) silence_buffer;
 
     for (uint8_t c = 0; c < 2; c++){
         dma_channel_config dc = dma_channel_get_default_config(i2s_dma_chan[c]);
@@ -283,10 +321,22 @@ static void i2s_start(uint32_t sample_rate, uint32_t div_fp8){
         channel_config_set_read_increment(&dc, true);
         channel_config_set_write_increment(&dc, false);
         channel_config_set_dreq(&dc, pio_get_dreq(pio, i2s_sm, true));
-        channel_config_set_chain_to(&dc, i2s_dma_chan[c ^ 1]);
+        channel_config_set_chain_to(&dc, i2s_ctrl_chan[c]);
         dma_channel_configure(i2s_dma_chan[c], &dc, &pio->txf[i2s_sm],
                               silence_buffer, buffer_frames * 2, false);
         dma_channel_set_irq0_enabled(i2s_dma_chan[c], true);
+
+        // one word: silence_addr into the finished channel's READ_ADDR (the
+        // non-triggering alias), then start the other data channel. Neither
+        // address moves and the count reloads, so it repeats forever.
+        dma_channel_config cc = dma_channel_get_default_config(i2s_ctrl_chan[c]);
+        channel_config_set_transfer_data_size(&cc, DMA_SIZE_32);
+        channel_config_set_read_increment(&cc, false);
+        channel_config_set_write_increment(&cc, false);
+        channel_config_set_dreq(&cc, DREQ_FORCE);
+        channel_config_set_chain_to(&cc, i2s_dma_chan[c ^ 1]);
+        dma_channel_configure(i2s_ctrl_chan[c], &cc, &dma_hw->ch[i2s_dma_chan[c]].read_addr,
+                              &silence_addr, 1, false);
     }
 
     irq_add_shared_handler(DMA_IRQ_0, i2s_dma_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
@@ -412,4 +462,8 @@ uint32_t audio_out_queued_frames(void){
 
 uint32_t audio_out_underruns(void){
     return underrun_count;
+}
+
+uint32_t audio_out_late_irqs(void){
+    return late_count;
 }

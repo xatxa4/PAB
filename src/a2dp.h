@@ -43,10 +43,14 @@
 #ifndef a2dp_h
 #define a2dp_h
 
+#include <stdbool.h>
 #include <stdint.h>
 
 
 void a2dp_sink_begin();
+
+/// True once a stream has been set up since boot.
+bool a2dp_sink_has_streamed(void);
 
 /// SBC frames thrown away because the SBC ring was full: the source is running
 /// ahead of us, or the ring is too small. audio_out_underruns() counts the

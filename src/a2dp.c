@@ -47,7 +47,6 @@
 #include <btstack.h>
 #include <btstack_resample.h>
 #include <classic/a2dp_sink.h>
-#include "hardware/watchdog.h"
 
 // for connection led 
 #include <pico/cyw43_arch.h>
@@ -55,17 +54,20 @@
 #include "btstack_audio_pico_i2s.h"
 
 
-// Dominates end to end latency: each SBC frame is 128 samples, so 20..40 frames
-// is ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts
-// lip sync out by a third of a second.
+// Dominates end to end latency: 20..40 full-size SBC frames of 128 samples is
+// ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts lip
+// sync out by a third of a second. Counted in full-size frames: a source using
+// fewer blocks or subbands is held at the same depth in samples - 20 frames of
+// 16 samples would be 7ms, less than one output buffer.
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
+#define FULL_FRAME_SAMPLES 128      // 16 blocks x 8 subbands
 
-// Playback starts once this many SBC frames are queued.
+// Playback starts once this many full-size frames are queued.
 #define START_FRAMES       ((OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2)
 
-// Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
-// burst. A full ring refuses a whole packet, and a packet carries up to 15
+// Room in the SBC ring above OPTIMAL_FRAMES_MAX, in frames of the largest
+// size, for packets that arrive in a burst. A full ring refuses a whole packet, and a packet carries up to 15
 // frames, so this must hold at least one maximal packet on top of the target
 // depth. Costs RAM only - the resampler, not the ring size, sets the latency.
 #define ADDITIONAL_FRAMES  30
@@ -87,6 +89,14 @@
 // (119), so a dual channel stream - SBC XQ - overran the stack buffer in
 // playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
 #define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
+
+// The most bytes a full frame's worth of samples can take: dual channel with 4
+// blocks of 4 subbands, which pays a header and scale factors for every 16
+// samples. 488 bytes per 128 samples at bitpool 53, against 224 in the largest
+// frames (dual channel, 16 blocks, 8 subbands) - the depth the ring is held at
+// is in samples, so it must be sized by this, not by frame count.
+#define MAX_SBC_BYTES_PER_FULL_FRAME \
+    ((FULL_FRAME_SAMPLES / 16) * SBC_FRAME_BYTES(2, 4, 4 * 2 * ADVERTISED_MAX_BITPOOL))
 
 // AVDTP delay reports are in units of 100us. Android 9 discards anything not
 // above 100ms and falls back to its own guess of about 200ms, which would put
@@ -144,6 +154,7 @@ static const uint8_t _sbc_capabilities[] = {
 };
 uint8_t _seid = 0;
 uint16_t _cid = 0;
+static bool _has_streamed;      // a stream was set up since boot
 static avdtp_stream_endpoint_t * _endpoint;
 stream_state_t _stream_state = STREAM_STATE_CLOSED;
 sbc_configuration_t _sbc_configuration = {0};
@@ -154,10 +165,14 @@ unsigned _sbc_frame_size = 0;
 btstack_resample_t _resample_instance = {0};
 btstack_ring_buffer_t _sbc_frame_ring_buffer = {0};
 btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
-uint8_t _sbc_frame_storage[(OPTIMAL_FRAMES_MAX + ADDITIONAL_FRAMES) * MAX_SBC_FRAME_SIZE] = {0};
-_Static_assert(sizeof(_sbc_frame_storage) / MAX_SBC_FRAME_SIZE >= OPTIMAL_FRAMES_MAX + MAX_FRAMES_PER_PACKET,
+uint8_t _sbc_frame_storage[OPTIMAL_FRAMES_MAX * MAX_SBC_BYTES_PER_FULL_FRAME + ADDITIONAL_FRAMES * MAX_SBC_FRAME_SIZE] = {0};
+_Static_assert(sizeof(_sbc_frame_storage) >= OPTIMAL_FRAMES_MAX * MAX_SBC_BYTES_PER_FULL_FRAME + MAX_FRAMES_PER_PACKET * MAX_SBC_FRAME_SIZE,
                "SBC ring cannot take a full packet of the largest frames on top of the target depth");
-uint8_t _decoded_audio_storage[(128+16) * BYTES_PER_FRAME] = {0};
+// Room for two decoded frames. Reads from the SBC ring are sized by the newest
+// packet's frame size, so after the source raises its bitpool one read can
+// complete two of the older, smaller frames, and the second one's output has
+// to wait here.
+uint8_t _decoded_audio_storage[(2*128+16) * BYTES_PER_FRAME] = {0};
 int16_t * _request_buffer = 0;
 int _request_frames = 0;
 
@@ -190,7 +205,7 @@ static uint8_t  _delay_attempts;
 static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channels, int sample_rate, void * context) {
     UNUSED(sample_rate);
     UNUSED(context);
-    UNUSED(num_channels);   // must be stereo == 2
+    UNUSED(num_channels);   // the count in the stream; the data is always stereo
 
     const btstack_audio_sink_t * audio_sink = btstack_audio_sink_get_instance();
     if (!audio_sink){
@@ -281,7 +296,12 @@ static void media_processing_init(sbc_configuration_t * configuration) {
 
     btstack_ring_buffer_init(&_sbc_frame_ring_buffer, _sbc_frame_storage, sizeof(_sbc_frame_storage));
     btstack_ring_buffer_init(&_decoded_audio_ring_buffer, _decoded_audio_storage, sizeof(_decoded_audio_storage));
-    btstack_resample_init(&_resample_instance, configuration->num_channels);
+    // BTstack's decoder is set up with two channels and a stride of two, so it
+    // always hands over interleaved stereo - a mono stream comes out with each
+    // sample in both slots, though it reports one channel. Set to that one
+    // channel, the resampler read half of each frame and the rest of the
+    // output was whatever lay on the stack: noise in every frame.
+    btstack_resample_init(&_resample_instance, NUM_CHANNELS);
 
     // setup audio playback
     const btstack_audio_sink_t * audio = btstack_audio_sink_get_instance();
@@ -307,8 +327,8 @@ static uint32_t estimated_delay_us(void) {
     uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
     if ((rate == 0) || (samples_per_frame == 0)) return 0;
 
-    uint32_t frames_ahead = START_FRAMES - ASSUMED_FRAMES_PER_PACKET;
-    uint32_t ahead_us     = (uint32_t) (((uint64_t) frames_ahead * samples_per_frame * 1000000u) / rate);
+    uint32_t samples_ahead = (START_FRAMES - ASSUMED_FRAMES_PER_PACKET) * FULL_FRAME_SAMPLES;
+    uint32_t ahead_us      = (uint32_t) (((uint64_t) samples_ahead * 1000000u) / rate);
     return ahead_us + 3 * btstack_audio_pico_sink_buffer_us(rate) / 2;
 }
 
@@ -615,6 +635,16 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // overwrites the field with that, so it is read once here.
             if (!_sbc_configuration.reconfigure){
                 _delay_reporting = (_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0;
+
+                // A stream the source closed and now sets up again on the same
+                // link. SDK 1.5.1's BTstack left the last one in CONFIGURED and
+                // only announces an OPEN from W4_OPEN_STREAM_WITH_SEID, so this
+                // one would open unannounced and never start. Newer BTstack
+                // does not gate on it; there this is what it would do anyway.
+                avdtp_connection_t * connection = avdtp_get_connection_for_avdtp_cid(_cid);
+                if ((connection != NULL) && (connection->a2dp_sink_config_process.state == A2DP_CONFIGURED)){
+                    connection->a2dp_sink_config_process.state = A2DP_W4_OPEN_STREAM_WITH_SEID;
+                }
             }
 
             if (_endpoint->state == AVDTP_STREAM_ENDPOINT_CONFIGURATION_SUBSTATEMACHINE){
@@ -665,6 +695,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _seid = a2dp_subevent_stream_established_get_local_seid(packet);
             _cid  = a2dp_subevent_stream_established_get_a2dp_cid(packet);
             _stream_state = STREAM_STATE_OPEN;
+            _has_streamed = true;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             gpio_put(CONN_PIN, 1);
             delay_report_initial();
@@ -672,6 +703,11 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // inquiry scan keeps interrupting the ACL link on its own 1.28s
             // cycle, and nobody needs to discover a speaker that is in use
             gap_discoverable_control(0);
+
+            // and page scan costs the same airtime, while a second phone that
+            // connects now can only be refused: one stream at a time. The
+            // source's own later channels ride its existing link.
+            gap_connectable_control(0);
 
             // printf("A2DP  Sink      : Streaming connection is established, address %s, cid 0x%02x, local seid %d\n",
             //        bd_addr_to_str(_a2dp->addr), _a2dp->a2dp_cid, _a2dp->a2dp_local_seid);
@@ -704,10 +740,15 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _delay_rejected  = false;
             _delay_reporting = false;
             media_processing_close();
-            gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             gpio_put(CONN_PIN, 0);
-            watchdog_enable(100, true);  // reboot in 0.1s, since reconnect is buggy
+            // No reboot here: this fires whenever the media channel closes,
+            // often with the link still up - a source going idle, or a codec
+            // switch (BlueZ closes and reconfigures on the same link) - and
+            // a reset then left the source on a dead link until its
+            // supervision timeout. bt.c restarts once the link has gone.
+            // Scans stay off too: the source still holds our one endpoint,
+            // and it is the one to open the next stream.
             break;
         
         case A2DP_SUBEVENT_COMMAND_REJECTED:
@@ -719,6 +760,10 @@ static void event_handler(uint8_t event, uint8_t *packet) {
 
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
             // printf("A2DP  Sink      : Signaling connection released\n");
+            // The source is done with us, though its link may stay up for
+            // other profiles: open up for the next one.
+            gap_connectable_control(1);
+            gap_discoverable_control(1);
             // _cid = 0;
             // _stream_state = STREAM_STATE_CLOSED;
             // media_processing_close();
@@ -824,8 +869,12 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
         _sbc_frames_dropped += sbc_header.num_frames;
     }
 
-    // decide on audio sync drift based on number of sbc frames in queue
-    int sbc_frames_in_buffer = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    // decide on audio sync drift based on the audio in the queue, in full-size
+    // frames whatever frame size the source chose
+    unsigned samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if (samples_per_frame == 0) samples_per_frame = FULL_FRAME_SAMPLES;
+    unsigned queued_frames     = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    int sbc_frames_in_buffer   = (int) ((queued_frames * samples_per_frame) / FULL_FRAME_SAMPLES);
 
     uint32_t resampling_factor;
 
@@ -879,6 +928,11 @@ void a2dp_sink_begin() {
 
     // BTstack gives the endpoint the Delay Reporting capability itself, which
     // is what lets a source turn reports on and sync its video to them.
+}
+
+
+bool a2dp_sink_has_streamed(void) {
+    return _has_streamed;
 }
 
 

@@ -23,8 +23,9 @@ Tiers are ordered by what blocks what, not by size.
 
 ## Status
 
-Steps 1–4 of the suggested order are in. Line numbers in the item text refer to
-the tree the list was written against, before the fixes.
+Steps 1–4 of the suggested order are in, plus a stability audit (0.6) that
+also brought in the watchdog half of 1.5. Line numbers in the item text refer
+to the tree the list was written against, before the fixes.
 
 | Item | State | Commit |
 |---|---|---|
@@ -38,8 +39,10 @@ the tree the list was written against, before the fixes.
 | `PAB_STDIO` linked UART stdio into every build (found on the way, not in the list below) | **Done** | `952d688` |
 | 0.4 AVDTP delay report: value, timing, tracking (found later) | **Done** | `9e76e01`…`c37cfa9` |
 | 0.5 Codec configuration buffer on the stack (found later) | **Done** | `f42bc52` |
+| 0.6 Stability audit (found later) | **Done** | `64eaa42`…`80cf4bc` |
 | 1.1 Mode descriptor | Open — next | |
-| 1.5 Fault handler, watchdog | Open — after 1.1 | |
+| 1.5 Watchdog | **Done** (in 0.6) | `e94cf18`, `80cf4bc` |
+| 1.5 Fault record, last-known-good mode | Open — after 1.1 | |
 | 1.6 Display off the audio thread | Open — no display code yet | |
 | Tier 3 `PAB_MODES` | Open | |
 | Measurement, then Tier 2 | Open — Tier 2 waits on 1.1 and the numbers | |
@@ -48,7 +51,9 @@ Everything above builds warning-free against Pico SDK 2.1.1 and 1.5.1, each
 commit on its own. None of it has been on hardware yet: the first thing to
 check on the bench is an SBC XQ (dual channel) stream, which 0.1 should turn
 from a crash into working audio, and the `I2S : ... Hz ... ppm` line at stream
-start.
+start. For 0.6: pair a new phone while another streams (no noise burst from
+the flash write, `late refills` may count), pause a source until it closes the
+stream and resume, and disconnect from the phone and reconnect at once.
 
 ---
 
@@ -157,7 +162,9 @@ is kept honest. Assert it rather than hoping.
 > **Adopted** (`4a0b803`). `ADDITIONAL_FRAMES` is 30, BTstack's own value, and
 > a static assertion requires room for the target depth plus one maximal
 > packet (15 frames) of the largest frame. The old value fails it. The ring is
-> 15.7 KB.
+> 15.7 KB. Since 0.6 (`f59b815`) it is sized by bytes per sample rather than
+> by frame count, 26.2 KB: the depth it is held at is in time, and short
+> frames cost more bytes per sample.
 
 ---
 
@@ -206,6 +213,39 @@ and copies every SET_CONFIGURATION into it long after setup has returned — 4
 bytes into whatever frame of the run loop's call chain sat there.
 
 > **Adopted** (`f42bc52`): the buffer is static, as in BTstack's own demo.
+
+### 0.6 Stability audit
+
+Also found later, in a pass over everything that can stop the box or the sound:
+the code paths, the RP2040 datasheet and errata, and the Pico SDK and BTstack
+sources of both supported SDKs with their issue trackers and change history. Each fix
+is its own commit, with the evidence in its message. Logic that can be run off
+the chip was checked on the host: the DMA chain in a cycle model, the A2DP
+state machine in a simulator driving the real BTstack sources of both SDKs,
+the SBC paths with BTstack's real decoder and resampler.
+
+| Found | Effect | Fix | Commit |
+|---|---|---|---|
+| A re-triggered DMA channel reloads its count, not its read address. A refill IRQ more than one buffer (11.6 ms) late — every flash write holds IRQs off for 1-400 ms, and pairing writes a link key — let the chain play whatever RAM follows the buffer | Full-scale noise burst on pairing, a TLV bank swap or a mode switch | Each data channel chains through a control channel that first aims it at silence; a late IRQ leaves it there and counts a `late refill` | `64eaa42`, `6f211b4` |
+| USB stdio waits up to 500 ms for a terminal that holds the port without reading | Half-second freeze of BTstack and the refill: a dropout | `PICO_STDIO_USB_STDOUT_TIMEOUT_US` 10 ms | `155b2dd` |
+| Mono SBC: BTstack's decoder always outputs stereo, the resampler was set to one channel | Half of every mono frame was stale stack memory | Resampler always two channels | `0ecc88d` |
+| A source raising its bitpool can complete two decoded frames in one call; the PCM ring held one | A click on every upward bitpool step (PipeWire adapts) | Room for two frames | `ee69d6a` |
+| The jitter buffer counted SBC frames; with 4 blocks × 4 subbands a frame is 16 samples, not 128 | 7-14 ms of buffer against 11.6 ms refills: holes | Counted in 128-sample frames | `356994b` |
+| ...and the SBC ring was sized in frames: dual channel 4×4 needs 488 bytes per 128 samples | Ring full below the resampler's band; packets refused | Sized by worst bytes per sample, 26.2 KB | `f59b815` |
+| Reboot on every STREAM_RELEASED (joba-1), which also fires on a source going idle or switching codec with its link up | Source left on a dead link until supervision timeout: "couldn't connect" | Reboot once the last ACL link has gone, if a stream ever ran | `8705e2c` |
+| ...and on SDK 1.5.1 BTstack then never announced a stream reopened on that link | Silence after resume or codec switch (1.5.1 only) | Config process moved on to W4_OPEN at the new SET_CONFIGURATION | `c89a7dc` |
+| Page scan stayed on while streaming | A second phone could page in mid-stream, costing airtime and possibly a flash write | Not discoverable or connectable while a source holds A2DP signaling | `51326bd`, `eb62cdf` |
+| The mode switch blinked with `sleep_ms()` from a BTstack timer, which runs in an IRQ | Debug builds panicked on the first mode switch | `busy_wait_ms()` | `e02deb3` |
+| `panic()`, HardFault and a controller that never comes up all ended in a hang until power-cycled | Box dead until unplugged | Watchdog, see 1.5 | `e94cf18`, `80cf4bc` |
+| A controller hardware error makes BTstack power-cycle its transport, leave its state OFF without an event and not reinitialise | Speaker unreachable, watchdog still fed | Watchdog fed only while `hci_get_state()` is WORKING | `80cf4bc` |
+| SSP worked on BTstack's defaults; BTstack 1.8.2 (SDK 2.3) turns auto accept off | New pairings would hang after an SDK upgrade | Set explicitly | `325b795` |
+| Deepest stack path ~2.45 KB against a 2 KB stack | Fault the moment stack guards or a scratch user appear | `PICO_STACK_SIZE` 4 KB, all of SCRATCH_Y | `fbb587a` |
+| SDK 1.5.1's CYW43 gSPI driver can end a write on the first PIO stall (raspberrypi/pico-sdk#2206) | Corrupt radio traffic, mostly during firmware download | CMake warns below 2.1.1 | `1bd4f72` |
+
+Checked and left alone: flash access during an erase, which the DMA refill
+never needs (its IRQ handler and data are in RAM, checked in the disassembly),
+and the `cyw43 buffer overflow` panic in the SDK's shared bus code, which the
+watchdog now turns into a restart.
 
 ---
 
@@ -319,6 +359,15 @@ path that must not miss a buffer boundary.
 > spelling SDK 1.5 and 2.x share.
 
 ### 1.5 Hard fault handler and a real watchdog
+
+> **Watchdog adopted** in 0.6 (`e94cf18`, `80cf4bc`). 8 s, short of the
+> RP2040-E1 ceiling of ~8.3 s. In Bluetooth mode it is armed before the radio
+> comes up and fed from a BTstack timer every 250 ms, only while HCI reports
+> WORKING or is still coming up within 20 s of boot, so a fault, a panic, a
+> wedged run loop and a dead controller all end in a restart. The BOOTSEL
+> blink and USB sound card mode feed it themselves. `watchdog_hw->scratch[0]`
+> still carries the mode. **Still open:** recording where a fault died, and
+> booting into the last-known-good mode — that waits on 1.1.
 
 Today a fault hangs silently and the only watchdog use is the mode-switch
 reboot. With four personalities, a fault handler that records where it died in a

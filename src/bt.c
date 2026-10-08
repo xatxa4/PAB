@@ -53,6 +53,11 @@
 
 #include <memory.h>
 
+#include <stdio.h>
+
+#include "pico/time.h"
+#include "hardware/watchdog.h"
+
 
 static bool _is_up = false;
 static bd_addr_t _local_addr = {0};
@@ -61,6 +66,9 @@ static void *_data = 0;
 static const char *_name = 0;
 static const char *_pin = 0;
 static btstack_packet_callback_registration_t _hci_registration;
+static unsigned _acl_links;
+static bool _was_up = false;
+static bool _power_failed = false;
 
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -74,10 +82,36 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     switch(hci_event_packet_get_type(packet)) {
 
         case BTSTACK_EVENT_STATE:
-            if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
+            // only ever leaves WORKING if the controller or its transport fails,
+            // and not always with this event: see bt_healthy()
+            _is_up = (btstack_event_state_get_state(packet) == HCI_STATE_WORKING);
+            if (!_is_up) return;
+            _was_up = true;
             gap_local_bd_addr(_local_addr);
-            _is_up = true;
             if (_cb) (*_cb)(_data);
+            break;
+
+        case BTSTACK_EVENT_POWERON_FAILED:
+            printf("BT              : controller did not power on\n");
+            _power_failed = true;
+            break;
+
+        case HCI_EVENT_CONNECTION_COMPLETE:
+            if (hci_event_connection_complete_get_status(packet) == ERROR_CODE_SUCCESS) _acl_links++;
+            break;
+
+        // A fresh start after each listening session, as joba-1's reboot on
+        // stream release gave - but only once the source's link has actually
+        // gone, so no source is left on a dead link and a stream reopened on a
+        // live one is not cut off. joba-1's "reconnect is buggy" came from an
+        // I2S driver that re-claimed its hardware on every stream; audio_out
+        // claims it once, so this is hygiene, not a workaround.
+        case HCI_EVENT_DISCONNECTION_COMPLETE:
+            if (hci_event_disconnection_complete_get_status(packet) != ERROR_CODE_SUCCESS) break;
+            if (_acl_links > 0) _acl_links--;
+            if ((_acl_links == 0) && a2dp_sink_has_streamed()) {
+                watchdog_reboot(0, 0, 0);
+            }
             break;
 
         case HCI_EVENT_PIN_CODE_REQUEST:
@@ -104,6 +138,11 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
     avrcp_begin();
 
     gap_set_local_name(_name);
+    // A speaker has no display or keys: "just works" pairing, accepted without
+    // asking. BTstack's defaults today, set here because BTstack 1.8.2 (Pico SDK
+    // 2.3) turns auto accept off, which would leave every new pairing hanging.
+    gap_ssp_set_io_capability(SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    gap_ssp_set_auto_accept(1);
     gap_discoverable_control(1); 
     gap_set_class_of_device(0x200414);  // Service Class: Audio, Major Device Class: Audio, Minor: Loudspeaker
     // Role switch stays on so a phone can become master after re-connect. Sniff
@@ -118,13 +157,27 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
 
 
 void bt_run() {
-    hci_power_control(HCI_POWER_ON);
+    if (hci_power_control(HCI_POWER_ON) != 0) {
+        printf("BT              : could not power on\n");
+        _power_failed = true;
+    }
     btstack_run_loop_execute();
 }
 
 
 bool bt_up() {
     return _is_up;
+}
+
+
+bool bt_healthy(uint32_t up_deadline_ms) {
+    if (_power_failed) return false;
+    // Asked, not taken from BTSTACK_EVENT_STATE: on a controller hardware
+    // error BTstack powers the transport off and on again, leaving its state
+    // OFF without saying so and without rerunning its init.
+    if (hci_get_state() == HCI_STATE_WORKING) return true;
+    // still coming up, as long as it never was up and is not taking forever
+    return !_was_up && (to_ms_since_boot(get_absolute_time()) < up_deadline_ms);
 }
 
 
