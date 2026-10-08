@@ -66,8 +66,8 @@
 // Playback starts once this many full-size frames are queued.
 #define START_FRAMES       ((OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2)
 
-// Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
-// burst. A full ring refuses a whole packet, and a packet carries up to 15
+// Room in the SBC ring above OPTIMAL_FRAMES_MAX, in frames of the largest
+// size, for packets that arrive in a burst. A full ring refuses a whole packet, and a packet carries up to 15
 // frames, so this must hold at least one maximal packet on top of the target
 // depth. Costs RAM only - the resampler, not the ring size, sets the latency.
 #define ADDITIONAL_FRAMES  30
@@ -89,6 +89,14 @@
 // (119), so a dual channel stream - SBC XQ - overran the stack buffer in
 // playback_handler. Derived, so raising ADVERTISED_MAX_BITPOOL grows it to match.
 #define MAX_SBC_FRAME_SIZE SBC_FRAME_BYTES(2, 8, 16 * 2 * ADVERTISED_MAX_BITPOOL)
+
+// The most bytes a full frame's worth of samples can take: dual channel with 4
+// blocks of 4 subbands, which pays a header and scale factors for every 16
+// samples. 488 bytes per 128 samples at bitpool 53, against 440 in the largest
+// frames - the depth the ring is held at is in samples, so it must be sized by
+// this, not by frame count.
+#define MAX_SBC_BYTES_PER_FULL_FRAME \
+    ((FULL_FRAME_SAMPLES / 16) * SBC_FRAME_BYTES(2, 4, 4 * 2 * ADVERTISED_MAX_BITPOOL))
 
 // AVDTP delay reports are in units of 100us. Android 9 discards anything not
 // above 100ms and falls back to its own guess of about 200ms, which would put
@@ -157,8 +165,8 @@ unsigned _sbc_frame_size = 0;
 btstack_resample_t _resample_instance = {0};
 btstack_ring_buffer_t _sbc_frame_ring_buffer = {0};
 btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
-uint8_t _sbc_frame_storage[(OPTIMAL_FRAMES_MAX + ADDITIONAL_FRAMES) * MAX_SBC_FRAME_SIZE] = {0};
-_Static_assert(sizeof(_sbc_frame_storage) / MAX_SBC_FRAME_SIZE >= OPTIMAL_FRAMES_MAX + MAX_FRAMES_PER_PACKET,
+uint8_t _sbc_frame_storage[OPTIMAL_FRAMES_MAX * MAX_SBC_BYTES_PER_FULL_FRAME + ADDITIONAL_FRAMES * MAX_SBC_FRAME_SIZE] = {0};
+_Static_assert(sizeof(_sbc_frame_storage) >= OPTIMAL_FRAMES_MAX * MAX_SBC_BYTES_PER_FULL_FRAME + MAX_FRAMES_PER_PACKET * MAX_SBC_FRAME_SIZE,
                "SBC ring cannot take a full packet of the largest frames on top of the target depth");
 // Room for two decoded frames. Reads from the SBC ring are sized by the newest
 // packet's frame size, so after the source raises its bitpool one read can
