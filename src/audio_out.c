@@ -171,14 +171,19 @@ static void __time_critical_func(i2s_dma_handler)(void){
         // the completion that raised this IRQ. Let that land before aiming it
         // at audio, or it would overwrite us. Bounded, so a fault there cannot
         // hang the IRQ; it only ever takes a cycle or two.
+        bool busy = false;
         for (uint8_t n = 0; n < 64; n++){
-            if ((dma_hw->ch[ch].read_addr == silence_addr) || dma_channel_is_busy(ch)) break;
+            busy = dma_channel_is_busy(ch);
+            if (busy || (dma_hw->ch[ch].read_addr == silence_addr)) break;
         }
 
         // A whole buffer late: the chain has already restarted this channel,
         // on the silence its control channel gave it. Leave it playing that;
-        // its next completion arms it as usual.
-        if (dma_channel_is_busy(ch)){
+        // its next completion arms it as usual. Decided on that one sample of
+        // BUSY: if the restarted channel finishes its silence right now, its
+        // IRQ is raised again, and arming it here would hand a buffer to a
+        // completion that frees it unplayed.
+        if (busy || (dma_hw->ints0 & (1u << ch))){
             chan_buffer[c] = -1;
             late_count++;
             continue;
