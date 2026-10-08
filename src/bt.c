@@ -82,7 +82,8 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     switch(hci_event_packet_get_type(packet)) {
 
         case BTSTACK_EVENT_STATE:
-            // only ever leaves WORKING if the controller or its transport fails
+            // only ever leaves WORKING if the controller or its transport fails,
+            // and not always with this event: see bt_healthy()
             _is_up = (btstack_event_state_get_state(packet) == HCI_STATE_WORKING);
             if (!_is_up) return;
             _was_up = true;
@@ -171,7 +172,10 @@ bool bt_up() {
 
 bool bt_healthy(uint32_t up_deadline_ms) {
     if (_power_failed) return false;
-    if (_is_up) return true;
+    // Asked, not taken from BTSTACK_EVENT_STATE: on a controller hardware
+    // error BTstack powers the transport off and on again, leaving its state
+    // OFF without saying so and without rerunning its init.
+    if (hci_get_state() == HCI_STATE_WORKING) return true;
     // still coming up, as long as it never was up and is not taking forever
     return !_was_up && (to_ms_since_boot(get_absolute_time()) < up_deadline_ms);
 }
