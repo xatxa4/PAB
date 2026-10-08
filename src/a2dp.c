@@ -47,7 +47,6 @@
 #include <btstack.h>
 #include <btstack_resample.h>
 #include <classic/a2dp_sink.h>
-#include "hardware/watchdog.h"
 
 // for connection led 
 #include <pico/cyw43_arch.h>
@@ -147,6 +146,7 @@ static const uint8_t _sbc_capabilities[] = {
 };
 uint8_t _seid = 0;
 uint16_t _cid = 0;
+static bool _has_streamed;      // a stream was set up since boot
 static avdtp_stream_endpoint_t * _endpoint;
 stream_state_t _stream_state = STREAM_STATE_CLOSED;
 sbc_configuration_t _sbc_configuration = {0};
@@ -677,6 +677,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _seid = a2dp_subevent_stream_established_get_local_seid(packet);
             _cid  = a2dp_subevent_stream_established_get_a2dp_cid(packet);
             _stream_state = STREAM_STATE_OPEN;
+            _has_streamed = true;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
             gpio_put(CONN_PIN, 1);
             delay_report_initial();
@@ -719,7 +720,11 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             gpio_put(CONN_PIN, 0);
-            watchdog_enable(100, true);  // reboot in 0.1s, since reconnect is buggy
+            // No reboot here: this fires whenever the media channel closes,
+            // often with the link still up - a source going idle, or a codec
+            // switch (BlueZ closes and reconfigures on the same link) - and
+            // a reset then left the source on a dead link until its
+            // supervision timeout. bt.c restarts once the link has gone.
             break;
         
         case A2DP_SUBEVENT_COMMAND_REJECTED:
@@ -895,6 +900,11 @@ void a2dp_sink_begin() {
 
     // BTstack gives the endpoint the Delay Reporting capability itself, which
     // is what lets a source turn reports on and sync its video to them.
+}
+
+
+bool a2dp_sink_has_streamed(void) {
+    return _has_streamed;
 }
 
 

@@ -53,6 +53,8 @@
 
 #include <memory.h>
 
+#include "hardware/watchdog.h"
+
 
 static bool _is_up = false;
 static bd_addr_t _local_addr = {0};
@@ -61,6 +63,7 @@ static void *_data = 0;
 static const char *_name = 0;
 static const char *_pin = 0;
 static btstack_packet_callback_registration_t _hci_registration;
+static unsigned _acl_links;
 
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -78,6 +81,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
             gap_local_bd_addr(_local_addr);
             _is_up = true;
             if (_cb) (*_cb)(_data);
+            break;
+
+        case HCI_EVENT_CONNECTION_COMPLETE:
+            if (hci_event_connection_complete_get_status(packet) == ERROR_CODE_SUCCESS) _acl_links++;
+            break;
+
+        // A fresh start after each listening session, as joba-1's reboot on
+        // stream release gave - but only once the source's link has actually
+        // gone, so no source is left on a dead link and a stream reopened on a
+        // live one is not cut off. joba-1's "reconnect is buggy" came from an
+        // I2S driver that re-claimed its hardware on every stream; audio_out
+        // claims it once, so this is hygiene, not a workaround.
+        case HCI_EVENT_DISCONNECTION_COMPLETE:
+            if (hci_event_disconnection_complete_get_status(packet) != ERROR_CODE_SUCCESS) break;
+            if (_acl_links > 0) _acl_links--;
+            if ((_acl_links == 0) && a2dp_sink_has_streamed()) {
+                watchdog_reboot(0, 0, 0);
+            }
             break;
 
         case HCI_EVENT_PIN_CODE_REQUEST:
