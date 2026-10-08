@@ -732,8 +732,6 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _delay_rejected  = false;
             _delay_reporting = false;
             media_processing_close();
-            gap_connectable_control(1);
-            gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             gpio_put(CONN_PIN, 0);
             // No reboot here: this fires whenever the media channel closes,
@@ -741,6 +739,8 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // switch (BlueZ closes and reconfigures on the same link) - and
             // a reset then left the source on a dead link until its
             // supervision timeout. bt.c restarts once the link has gone.
+            // Scans stay off too: the source still holds our one endpoint,
+            // and it is the one to open the next stream.
             break;
         
         case A2DP_SUBEVENT_COMMAND_REJECTED:
@@ -752,6 +752,10 @@ static void event_handler(uint8_t event, uint8_t *packet) {
 
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
             // printf("A2DP  Sink      : Signaling connection released\n");
+            // The source is done with us, though its link may stay up for
+            // other profiles: open up for the next one.
+            gap_connectable_control(1);
+            gap_discoverable_control(1);
             // _cid = 0;
             // _stream_state = STREAM_STATE_CLOSED;
             // media_processing_close();
