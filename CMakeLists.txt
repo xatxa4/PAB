@@ -17,6 +17,15 @@ include(pico_sdk_import.cmake)
 
 pico_sdk_init()
 
+# Built and checked against 2.1.1. 1.5.1 still builds, but its CYW43 driver
+# can count a gSPI write finished before its DMA is (fixed in 2.1.1, #2206),
+# and newer SDKs ship a BTstack whose pairing defaults changed.
+if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
+    message(WARNING "PAB is tested with Pico SDK 2.1.1; ${PICO_SDK_VERSION_STRING} lacks CYW43 driver fixes from 2.1.x")
+elseif (PICO_SDK_VERSION_STRING VERSION_GREATER "2.1.1")
+    message(STATUS "PAB is tested with Pico SDK 2.1.1; building with ${PICO_SDK_VERSION_STRING}")
+endif()
+
 project(picow-a2dp CXX C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
