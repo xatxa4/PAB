@@ -48,6 +48,7 @@
 #include <stdio.h>
 
 #include "pico/stdlib.h"
+#include "hardware/watchdog.h"
 
 #include "audio_out.h"
 #include "app_mode.h"
@@ -67,6 +68,7 @@ void usb_dac_run(void){
     while (true){
         audio_out_service();    // no fill callback registered: plays silence
         mode_button_poll();     // rate limits itself
+        watchdog_update();
         sleep_ms(audio_out_service_interval_ms());
     }
 }

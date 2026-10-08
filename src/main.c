@@ -45,6 +45,8 @@
 #include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
 
+#include "btstack_run_loop.h"
+
 #include "app_mode.h"
 #include "bt.h"
 #include "mode_button.h"
@@ -55,11 +57,24 @@
 // whether a binary contains a fix without having to boot it.
 bi_decl(bi_program_version_string(PAB_GIT_VERSION));
 
+// Without this, a panic or hard fault ends in a breakpoint and the core sits
+// locked up until power-cycled, and so does a Bluetooth controller that never
+// comes up. Long enough for a firmware download and a 400ms flash erase, short
+// of the RP2040's ~8.3s maximum.
+#ifndef PAB_WATCHDOG_MS
+#define PAB_WATCHDOG_MS         8000
+#endif
+#define PAB_WATCHDOG_FEED_MS    250
+#define PAB_BT_UP_DEADLINE_MS   20000   // after boot, for the controller to come up
+
+static volatile bool _fatal_entered;
+
 
 // Unrecoverable error happened. Reboot by setting watchdog.
 // Blink led until watchdog fires
 // If RUN_PIN is defined then try reset via run pin after 5 blinks
 void fatal() {
+    _fatal_entered = true;        // so the feeder cannot keep this alive
     watchdog_enable(1000, true);  // reboot in 1s
     #ifdef RUN_PIN
         unsigned count = 0;
@@ -87,7 +102,23 @@ void on_bt_up( void * ) {
 }
 
 
+// Fed from a BTstack timer, so a wedged BTstack context stops it as surely as a
+// fault does, and only while the controller is up or still coming up.
+static btstack_timer_source_t _watchdog_timer;
+
+static void watchdog_timer_handler(btstack_timer_source_t * ts) {
+    if (!_fatal_entered && bt_healthy(PAB_BT_UP_DEADLINE_MS)) {
+        watchdog_update();
+    }
+    btstack_run_loop_set_timer(ts, PAB_WATCHDOG_FEED_MS);
+    btstack_run_loop_add_timer(ts);
+}
+
+
 static void bt_sink_run(void) {
+    // before the radio: a controller bring-up that hangs is caught as well
+    watchdog_enable(PAB_WATCHDOG_MS, true);
+
     // initialize CYW43 driver architecture (will enable BT if/because CYW43_ENABLE_BLUETOOTH == 1)
     if (cyw43_arch_init()) {
         printf("Failed to init cyw43_arch\n");
@@ -102,6 +133,10 @@ static void bt_sink_run(void) {
     // BTstack owns the loop from here on, so the mode button rides along on a
     // run loop timer rather than being polled by us.
     mode_button_start();
+
+    btstack_run_loop_set_timer_handler(&_watchdog_timer, &watchdog_timer_handler);
+    btstack_run_loop_set_timer(&_watchdog_timer, PAB_WATCHDOG_FEED_MS);
+    btstack_run_loop_add_timer(&_watchdog_timer);
 
     printf("Setup done\n");
     bt_run();
@@ -118,6 +153,7 @@ int main() {
 
     switch (mode) {
         case APP_MODE_USB_DAC:
+            watchdog_enable(PAB_WATCHDOG_MS, true);     // fed from its loop
             usb_dac_run();
             break;
         case APP_MODE_BT_SINK:

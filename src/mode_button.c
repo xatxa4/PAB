@@ -35,6 +35,7 @@
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
+#include "hardware/watchdog.h"
 
 #include "btstack_run_loop.h"
 
@@ -134,6 +135,7 @@ static void announce_and_switch(void){
         busy_wait_ms(MODE_BUTTON_BLINK_ON_MS);
         led_set(false);
         busy_wait_ms(MODE_BUTTON_BLINK_OFF_MS);
+        watchdog_update();      // this blocks the loop that feeds it
     }
 
     // The bootrom samples this same button after the watchdog reset. Rebooting
@@ -151,6 +153,7 @@ static void announce_and_switch(void){
         busy_wait_ms(MODE_BUTTON_RELEASE_BLINK_MS);
         led_set(false);
         busy_wait_ms(MODE_BUTTON_RELEASE_BLINK_MS);
+        watchdog_update();
     }
     led_set(false);
 

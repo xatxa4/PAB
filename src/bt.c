@@ -53,6 +53,9 @@
 
 #include <memory.h>
 
+#include <stdio.h>
+
+#include "pico/time.h"
 #include "hardware/watchdog.h"
 
 
@@ -64,6 +67,8 @@ static const char *_name = 0;
 static const char *_pin = 0;
 static btstack_packet_callback_registration_t _hci_registration;
 static unsigned _acl_links;
+static bool _was_up = false;
+static bool _power_failed = false;
 
 
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
@@ -77,10 +82,17 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     switch(hci_event_packet_get_type(packet)) {
 
         case BTSTACK_EVENT_STATE:
-            if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING) return;
+            // only ever leaves WORKING if the controller or its transport fails
+            _is_up = (btstack_event_state_get_state(packet) == HCI_STATE_WORKING);
+            if (!_is_up) return;
+            _was_up = true;
             gap_local_bd_addr(_local_addr);
-            _is_up = true;
             if (_cb) (*_cb)(_data);
+            break;
+
+        case BTSTACK_EVENT_POWERON_FAILED:
+            printf("BT              : controller did not power on\n");
+            _power_failed = true;
             break;
 
         case HCI_EVENT_CONNECTION_COMPLETE:
@@ -139,13 +151,24 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
 
 
 void bt_run() {
-    hci_power_control(HCI_POWER_ON);
+    if (hci_power_control(HCI_POWER_ON) != 0) {
+        printf("BT              : could not power on\n");
+        _power_failed = true;
+    }
     btstack_run_loop_execute();
 }
 
 
 bool bt_up() {
     return _is_up;
+}
+
+
+bool bt_healthy(uint32_t up_deadline_ms) {
+    if (_power_failed) return false;
+    if (_is_up) return true;
+    // still coming up, as long as it never was up and is not taking forever
+    return !_was_up && (to_ms_since_boot(get_absolute_time()) < up_deadline_ms);
 }
 
 
