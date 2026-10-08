@@ -92,9 +92,9 @@
 
 // The most bytes a full frame's worth of samples can take: dual channel with 4
 // blocks of 4 subbands, which pays a header and scale factors for every 16
-// samples. 488 bytes per 128 samples at bitpool 53, against 440 in the largest
-// frames - the depth the ring is held at is in samples, so it must be sized by
-// this, not by frame count.
+// samples. 488 bytes per 128 samples at bitpool 53, against 224 in the largest
+// frames (dual channel, 16 blocks, 8 subbands) - the depth the ring is held at
+// is in samples, so it must be sized by this, not by frame count.
 #define MAX_SBC_BYTES_PER_FULL_FRAME \
     ((FULL_FRAME_SAMPLES / 16) * SBC_FRAME_BYTES(2, 4, 4 * 2 * ADVERTISED_MAX_BITPOOL))
 
