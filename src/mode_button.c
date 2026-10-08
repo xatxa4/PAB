@@ -122,16 +122,18 @@ static void led_set(bool on){
 
 
 // Blink, wait for the release, reboot. Blocks whatever loop called us, which is
-// fine: nothing after this matters.
+// fine: nothing after this matters. Busy-waits rather than sleeps: in Bluetooth
+// mode this runs from a BTstack timer, inside the async_context IRQ, and the
+// SDK's sleep_ms() panics there in Debug builds.
 static void announce_and_switch(void){
     printf("MODE            : BOOTSEL held, switching to %s\n",
            app_mode_name(app_mode_next()));
 
     for (unsigned i = 0; i < MODE_BUTTON_BLINKS; i++){
         led_set(true);
-        sleep_ms(MODE_BUTTON_BLINK_ON_MS);
+        busy_wait_ms(MODE_BUTTON_BLINK_ON_MS);
         led_set(false);
-        sleep_ms(MODE_BUTTON_BLINK_OFF_MS);
+        busy_wait_ms(MODE_BUTTON_BLINK_OFF_MS);
     }
 
     // The bootrom samples this same button after the watchdog reset. Rebooting
@@ -146,9 +148,9 @@ static void announce_and_switch(void){
             break;
         }
         led_set(true);
-        sleep_ms(MODE_BUTTON_RELEASE_BLINK_MS);
+        busy_wait_ms(MODE_BUTTON_RELEASE_BLINK_MS);
         led_set(false);
-        sleep_ms(MODE_BUTTON_RELEASE_BLINK_MS);
+        busy_wait_ms(MODE_BUTTON_RELEASE_BLINK_MS);
     }
     led_set(false);
 
