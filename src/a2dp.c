@@ -157,7 +157,11 @@ btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
 uint8_t _sbc_frame_storage[(OPTIMAL_FRAMES_MAX + ADDITIONAL_FRAMES) * MAX_SBC_FRAME_SIZE] = {0};
 _Static_assert(sizeof(_sbc_frame_storage) / MAX_SBC_FRAME_SIZE >= OPTIMAL_FRAMES_MAX + MAX_FRAMES_PER_PACKET,
                "SBC ring cannot take a full packet of the largest frames on top of the target depth");
-uint8_t _decoded_audio_storage[(128+16) * BYTES_PER_FRAME] = {0};
+// Room for two decoded frames. Reads from the SBC ring are sized by the newest
+// packet's frame size, so after the source raises its bitpool one read can
+// complete two of the older, smaller frames, and the second one's output has
+// to wait here.
+uint8_t _decoded_audio_storage[(2*128+16) * BYTES_PER_FRAME] = {0};
 int16_t * _request_buffer = 0;
 int _request_frames = 0;
 
