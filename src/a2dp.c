@@ -627,6 +627,16 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // overwrites the field with that, so it is read once here.
             if (!_sbc_configuration.reconfigure){
                 _delay_reporting = (_endpoint->remote_sep.configured_service_categories & (1 << AVDTP_DELAY_REPORTING)) != 0;
+
+                // A stream the source closed and now sets up again on the same
+                // link. SDK 1.5.1's BTstack left the last one in CONFIGURED and
+                // only announces an OPEN from W4_OPEN_STREAM_WITH_SEID, so this
+                // one would open unannounced and never start. Newer BTstack
+                // does not gate on it; there this is what it would do anyway.
+                avdtp_connection_t * connection = avdtp_get_connection_for_avdtp_cid(_cid);
+                if ((connection != NULL) && (connection->a2dp_sink_config_process.state == A2DP_CONFIGURED)){
+                    connection->a2dp_sink_config_process.state = A2DP_W4_OPEN_STREAM_WITH_SEID;
+                }
             }
 
             if (_endpoint->state == AVDTP_STREAM_ENDPOINT_CONFIGURATION_SUBSTATEMACHINE){
