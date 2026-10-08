@@ -686,6 +686,11 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             // cycle, and nobody needs to discover a speaker that is in use
             gap_discoverable_control(0);
 
+            // and page scan costs the same airtime, while a second phone that
+            // connects now can only be refused: one stream at a time. The
+            // source's own later channels ride its existing link.
+            gap_connectable_control(0);
+
             // printf("A2DP  Sink      : Streaming connection is established, address %s, cid 0x%02x, local seid %d\n",
             //        bd_addr_to_str(_a2dp->addr), _a2dp->a2dp_cid, _a2dp->a2dp_local_seid);
             break;
@@ -717,6 +722,7 @@ static void event_handler(uint8_t event, uint8_t *packet) {
             _delay_rejected  = false;
             _delay_reporting = false;
             media_processing_close();
+            gap_connectable_control(1);
             gap_discoverable_control(1);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
             gpio_put(CONN_PIN, 0);
