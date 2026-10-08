@@ -48,9 +48,17 @@ set(PAB_SOURCES
     src/avrcp.c
 )
 
+# Vendored USB device stack. Kept out of PAB_SOURCES so -Wall -Wextra applies
+# to our files only.
+set(PAB_USB_DEVICE_SOURCES
+    pico_usb_device/usb_device.c
+    pico_usb_device/usb_stream_helper.c
+)
+
 target_sources(${PROJECT_NAME} PRIVATE
     ${PICO_SDK_PATH}/lib/btstack/src/btstack_audio.c
     ${PAB_SOURCES}
+    ${PAB_USB_DEVICE_SOURCES}
 )
 
 # Warnings for our own files only. The SDK's libraries are INTERFACE libraries
@@ -98,6 +106,15 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     BT_NAME="PicoW"
 )
 
+# These change struct layouts and array sizes in the vendored USB stack's
+# headers, so every translation unit must see the same values: target-wide,
+# never per file.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
+    PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
+    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=3
+)
+
 # Debug output: usb | uart | none.
 #   usb   development default. Costs a periodic TinyUSB task on core0 forever,
 #         and occupies the USB peripheral.
@@ -118,11 +135,15 @@ target_link_libraries(${PROJECT_NAME}
     pico_btstack_classic
     pico_btstack_cyw43
     pico_cyw43_arch_none
+    pico_fix_rp2040_usb_device_enumeration
+    hardware_irq
+    pico_unique_id
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR} # For btstack config
     ${PAB_GENERATED_DIR}      # pab_version.h
+    ${CMAKE_CURRENT_LIST_DIR}/pico_usb_device/include
 )
 
 # Both drivers set explicitly: pico_stdlib enables stdio UART for every target

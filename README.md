@@ -51,6 +51,11 @@ that console and no other. Pin assignments, I2S buffer depth (in time:
 `PICO_AUDIO_I2S_BUFFER_US`), the highest supported sample rate and the Bluetooth
 name are compile definitions in `CMakeLists.txt`.
 
+In USB sound card mode the USB port belongs to the sound card, so a console
+exists there only with `-DPAB_STDIO=uart`. For the same reason `picotool`
+cannot reboot the board into BOOTSEL in that mode: hold BOOTSEL while plugging
+in, or switch modes first.
+
 Every build is stamped with `git describe --dirty`. It is printed at boot, and
 `picotool info build/picow-a2dp.uf2` reads it off the file before flashing — a
 `-dirty` suffix means uncommitted changes went in.
@@ -104,6 +109,7 @@ advice; if you intend to sell a product based on this, take proper counsel.
 | `src/audio_out.c` | BambooMaster; xatxa4 | MIT |
 | `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.*` | xatxa4 | MIT |
 | `pico_i2s_pio/` (vendored, incl. `i2s.pio`) | BambooMaster | MIT — see `pico_i2s_pio/LICENSE` |
+| `pico_usb_device/` (vendored) | Raspberry Pi (Trading) Ltd.; one patch from BambooMaster's fork, one from xatxa4 | BSD-3-Clause — see `pico_usb_device/LICENSE` |
 | Raspberry Pi Pico SDK (linked) | Raspberry Pi (Trading) Ltd. | BSD-3-Clause |
 | BTstack (linked, via the Pico SDK) | BlueKitchen GmbH | BlueKitchen BTstack licence |
 
@@ -125,7 +131,8 @@ summary.
   the RP2040; and `usb_sound_card_hires`, which established the working DAC
   configuration. <https://github.com/BambooMaster/pico-i2s-pio>
 - **Raspberry Pi (Trading) Ltd.** — the Pico SDK; `pico-extras`' `audio_i2s`,
-  whose DMA-and-IRQ structure the output stage follows; and the
+  whose DMA-and-IRQ structure the output stage follows; `pico-extras`'
+  `usb_device`, the USB device stack vendored in `pico_usb_device/`; and the
   `picoboard/button` example from `pico-examples`, which is how `mode_button.c`
   reads BOOTSEL at runtime.
 

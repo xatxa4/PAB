@@ -144,11 +144,20 @@ static void bt_sink_run(void) {
 
 
 int main() {
-    stdio_init_all();
+    // The mode comes first because it decides which console may exist: the
+    // sound card owns the USB peripheral, and TinyUSB's console would fight it
+    // for the same interrupt. Resolving it prints nothing, so it is safe here.
+    app_mode_t mode = app_mode_current();
+    if (mode == APP_MODE_USB_DAC) {
+#if LIB_PICO_STDIO_UART
+        stdio_uart_init();      // the only console this mode can have; declared
+                                // by pico/stdlib.h when it is linked
+#endif
+    } else {
+        stdio_init_all();
+    }
 
     printf("PAB             : %s\n", PAB_GIT_VERSION);
-
-    app_mode_t mode = app_mode_current();
     printf("MODE            : %s\n", app_mode_name(mode));
 
     switch (mode) {
