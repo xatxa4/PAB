@@ -55,13 +55,16 @@
 #include "btstack_audio_pico_i2s.h"
 
 
-// Dominates end to end latency: each SBC frame is 128 samples, so 20..40 frames
-// is ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts
-// lip sync out by a third of a second.
+// Dominates end to end latency: 20..40 full-size SBC frames of 128 samples is
+// ~60..120ms at 44.1kHz. joba-1 uses 60/120/30, which is safer but puts lip
+// sync out by a third of a second. Counted in full-size frames: a source using
+// fewer blocks or subbands is held at the same depth in samples - 20 frames of
+// 16 samples would be 7ms, less than one output buffer.
 #define OPTIMAL_FRAMES_MIN 20
 #define OPTIMAL_FRAMES_MAX 40
+#define FULL_FRAME_SAMPLES 128      // 16 blocks x 8 subbands
 
-// Playback starts once this many SBC frames are queued.
+// Playback starts once this many full-size frames are queued.
 #define START_FRAMES       ((OPTIMAL_FRAMES_MIN + OPTIMAL_FRAMES_MAX) / 2)
 
 // Room in the SBC ring above OPTIMAL_FRAMES_MAX for packets that arrive in a
@@ -316,8 +319,8 @@ static uint32_t estimated_delay_us(void) {
     uint32_t samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
     if ((rate == 0) || (samples_per_frame == 0)) return 0;
 
-    uint32_t frames_ahead = START_FRAMES - ASSUMED_FRAMES_PER_PACKET;
-    uint32_t ahead_us     = (uint32_t) (((uint64_t) frames_ahead * samples_per_frame * 1000000u) / rate);
+    uint32_t samples_ahead = (START_FRAMES - ASSUMED_FRAMES_PER_PACKET) * FULL_FRAME_SAMPLES;
+    uint32_t ahead_us      = (uint32_t) (((uint64_t) samples_ahead * 1000000u) / rate);
     return ahead_us + 3 * btstack_audio_pico_sink_buffer_us(rate) / 2;
 }
 
@@ -833,8 +836,12 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
         _sbc_frames_dropped += sbc_header.num_frames;
     }
 
-    // decide on audio sync drift based on number of sbc frames in queue
-    int sbc_frames_in_buffer = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    // decide on audio sync drift based on the audio in the queue, in full-size
+    // frames whatever frame size the source chose
+    unsigned samples_per_frame = _sbc_configuration.block_length * _sbc_configuration.subbands;
+    if (samples_per_frame == 0) samples_per_frame = FULL_FRAME_SAMPLES;
+    unsigned queued_frames     = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
+    int sbc_frames_in_buffer   = (int) ((queued_frames * samples_per_frame) / FULL_FRAME_SAMPLES);
 
     uint32_t resampling_factor;
 
