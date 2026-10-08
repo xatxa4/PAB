@@ -116,6 +116,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 if (PAB_STDIO STREQUAL "usb")
     pico_enable_stdio_usb(${PROJECT_NAME} 1)
     pico_enable_stdio_uart(${PROJECT_NAME} 0)
+    # printf runs in BTstack's context. With a terminal holding the port open
+    # but not reading, the SDK waits this long for room before dropping output
+    # - 500 ms by default, ten times the audio queued ahead of the DAC.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE PICO_STDIO_USB_STDOUT_TIMEOUT_US=10000)
 elseif (PAB_STDIO STREQUAL "uart")
     pico_enable_stdio_usb(${PROJECT_NAME} 0)
     pico_enable_stdio_uart(${PROJECT_NAME} 1)
