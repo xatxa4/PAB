@@ -68,6 +68,26 @@ Many TVs — Samsung, LG, Roku, Apple TV among them — may not, and need their
 manual audio/video sync setting instead; about 90–100 ms is the place to start.
 The console shows `latency measured` and `delay report` lines while streaming.
 
+## Staying up
+
+- **Watchdog.** A crash, a hang or a Bluetooth controller that stops working
+  restarts the Pico within about 8 seconds, instead of leaving it dead until
+  unplugged.
+- **One source at a time.** While a phone has PAB connected for audio, PAB is
+  neither discoverable nor connectable, so another phone cannot cut in. It
+  opens up again when that phone disconnects or closes its audio connection.
+- **A fresh start per session.** Once the last phone has disconnected after
+  playing something, PAB restarts and comes back ready for the next one. A
+  phone that only pauses, or switches codec, stays connected.
+- **The console.** `I2S : N underruns, M late refills` appears whenever either
+  count goes up, at most once a second: the times the DAC ran out of audio, and
+  the times its refill came too late (during a flash write, for example) and
+  it played silence instead. With a USB console, a terminal that holds the port
+  open without reading holds up the box for at most 10 ms per message; the
+  output is dropped.
+- **Pico SDK 2.1.1** is what PAB is built and checked against. It still
+  builds with 1.5.1, with a warning: that SDK's radio driver has a known bug.
+
 ---
 
 # Licensing
