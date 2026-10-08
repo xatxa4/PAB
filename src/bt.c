@@ -137,6 +137,11 @@ void bt_begin( const char *name, const char *pin, bt_on_up_cb_t cb, void *data )
     avrcp_begin();
 
     gap_set_local_name(_name);
+    // A speaker has no display or keys: "just works" pairing, accepted without
+    // asking. BTstack's defaults today, set here because BTstack 1.8.2 (Pico SDK
+    // 2.3) turns auto accept off, which would leave every new pairing hanging.
+    gap_ssp_set_io_capability(SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    gap_ssp_set_auto_accept(1);
     gap_discoverable_control(1); 
     gap_set_class_of_device(0x200414);  // Service Class: Audio, Major Device Class: Audio, Minor: Loudspeaker
     // Role switch stays on so a phone can become master after re-connect. Sniff
