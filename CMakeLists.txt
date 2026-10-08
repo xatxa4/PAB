@@ -79,6 +79,12 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     PICO_AUDIO_I2S_MAX_SAMPLE_RATE=96000
     # RUN_PIN=22
     CONN_PIN=26
+    # The deepest measured path - a packet that starts the stream, decoding
+    # inside the BTstack IRQ with USB and DMA IRQs nested on top - needs ~2.5KB
+    # against the default 2KB reservation. It worked only because nothing sits
+    # below; reserve all of SCRATCH_Y, which nothing else uses, so stack guards
+    # or a future scratch user cannot turn that into a fault. No RAM cost.
+    PICO_STACK_SIZE=0x1000
     BT_PIN="0000"
     BT_NAME="PicoW"
 )
