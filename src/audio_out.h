@@ -107,4 +107,9 @@ uint32_t audio_out_queued_frames(void);
 /// source is not keeping up; zero means a gap came from somewhere else.
 uint32_t audio_out_underruns(void);
 
+/// Times the refill IRQ came a whole buffer late, so a buffer of silence played
+/// instead of the next one queued. Interrupts held off that long - a flash
+/// write, typically - and not the source.
+uint32_t audio_out_late_irqs(void);
+
 #endif

@@ -106,15 +106,18 @@ static void driver_timer_handler_sink(btstack_timer_source_t * ts){
 
     // says whether a gap was ours: the DMA ran out of audio and played silence.
     // Throttled to once a second so reporting cannot make the problem worse.
-    static uint32_t reported;
+    static uint32_t reported, reported_late;
     static uint32_t last_report_ms;
     uint32_t now = btstack_run_loop_get_time_ms();
     if ((uint32_t) (now - last_report_ms) >= 1000){
         last_report_ms = now;
         uint32_t underruns = audio_out_underruns();
-        if (underruns != reported){
-            reported = underruns;
-            printf("I2S             : %lu underruns\n", (unsigned long) reported);
+        uint32_t late      = audio_out_late_irqs();
+        if ((underruns != reported) || (late != reported_late)){
+            reported      = underruns;
+            reported_late = late;
+            printf("I2S             : %lu underruns, %lu late refills\n",
+                   (unsigned long) reported, (unsigned long) reported_late);
         }
     }
 
