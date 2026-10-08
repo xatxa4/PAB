@@ -190,7 +190,7 @@ static uint8_t  _delay_attempts;
 static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channels, int sample_rate, void * context) {
     UNUSED(sample_rate);
     UNUSED(context);
-    UNUSED(num_channels);   // must be stereo == 2
+    UNUSED(num_channels);   // the count in the stream; the data is always stereo
 
     const btstack_audio_sink_t * audio_sink = btstack_audio_sink_get_instance();
     if (!audio_sink){
@@ -281,7 +281,12 @@ static void media_processing_init(sbc_configuration_t * configuration) {
 
     btstack_ring_buffer_init(&_sbc_frame_ring_buffer, _sbc_frame_storage, sizeof(_sbc_frame_storage));
     btstack_ring_buffer_init(&_decoded_audio_ring_buffer, _decoded_audio_storage, sizeof(_decoded_audio_storage));
-    btstack_resample_init(&_resample_instance, configuration->num_channels);
+    // BTstack's decoder is set up with two channels and a stride of two, so it
+    // always hands over interleaved stereo - a mono stream comes out with each
+    // sample in both slots, though it reports one channel. Set to that one
+    // channel, the resampler read half of each frame and the rest of the
+    // output was whatever lay on the stack: noise in every frame.
+    btstack_resample_init(&_resample_instance, NUM_CHANNELS);
 
     // setup audio playback
     const btstack_audio_sink_t * audio = btstack_audio_sink_get_instance();
