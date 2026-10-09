@@ -4,8 +4,9 @@ A Bluetooth A2DP audio sink for the Raspberry Pi Pico W, feeding an external I2S
 DAC with 32-bit frames at BCLK = 64fs. Built for an ES9038Q2M, which will not
 accept the 16-bit / 32fs stream the usual Pico I2S drivers produce.
 
-A mode framework is in place for further personalities (USB sound card, internet
-radio, S/PDIF receiver); only the Bluetooth sink is implemented today.
+A mode framework switches between personalities: the Bluetooth sink, and a USB
+sound card that is being brought up step by step (see Modes). Internet radio and
+an S/PDIF receiver could follow.
 
 ## Wiring
 
@@ -15,14 +16,19 @@ radio, S/PDIF receiver); only the Bluetooth sink is implemented today.
 | LRCLK / WS | GP20 | `PICO_AUDIO_I2S_CLOCK_PIN_BASE` |
 | BCK | GP21 | clock pin base + 1 |
 | MCLK | — | off by default, see `CMakeLists.txt` |
-| Connection indicator | GP26 | high while a stream is established |
+| Connection indicator | GP26 | high while a stream is established (Bluetooth) or playing (USB sound card) |
 
 ## Modes
 
-The box has two personalities: the Bluetooth sink, and a USB sound card that is
-scaffolding only so far. **Hold BOOTSEL for about a fifth of a second to switch
-to the next one.** The onboard LED flashes three times slowly, and the Pico
-reboots into the new mode.
+The box has two personalities: the Bluetooth sink, and a USB sound card. The
+sound card enumerates and plays 16 and 24 bit stereo at 48 kHz; GP26 is high
+while it plays. Other sample rates and the host's volume and mute come next,
+and so does the feedback that keeps the host's clock and the DAC's together:
+until then a long stream drifts, and the console counts the audio it drops or
+pads. It has only been compiled, not yet run on a host.
+
+**Hold BOOTSEL for about a fifth of a second to switch to the other mode.** The
+onboard LED flashes three times slowly, and the Pico reboots into the new mode.
 
 The mode is put in a watchdog scratch register, which survives the reset, and
 written to flash so a cold start comes back the same way. Flash is only touched
@@ -107,7 +113,7 @@ advice; if you intend to sell a product based on this, take proper counsel.
 |---|---|---|
 | `src/a2dp.c`, `avrcp.c`, `bt.c`, `sdp.c`, `main.c`, `btstack_audio_pico_i2s.*` | BlueKitchen GmbH; joba-1; xatxa4 | BlueKitchen BTstack licence (BSD-3-Clause **plus a non-commercial clause**) |
 | `src/audio_out.c` | BambooMaster; xatxa4 | MIT |
-| `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.h` | xatxa4 | MIT |
+| `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.h`, `usb_dac_pcm.h` | xatxa4 | MIT |
 | `src/usb_dac.c` | Raspberry Pi (Trading) Ltd.; BambooMaster; xatxa4 | BSD-3-Clause AND MIT |
 | `pico_i2s_pio/` (vendored, incl. `i2s.pio`) | BambooMaster | MIT — see `pico_i2s_pio/LICENSE` |
 | `pico_usb_device/` (vendored) | Raspberry Pi (Trading) Ltd.; one patch from BambooMaster's fork, one from xatxa4 | BSD-3-Clause — see `pico_usb_device/LICENSE` |
@@ -140,7 +146,7 @@ summary.
 ## What this means in practice
 
 The original work in this project (`audio_out.h`, `app_mode.*`, `mode_button.*`,
-`usb_dac.h`, and this project's own changes throughout) is offered under the **MIT Licence** —
+`usb_dac.h`, `usb_dac_pcm.h`, and this project's own changes throughout) is offered under the **MIT Licence** —
 the most permissive of the licences involved. See `LICENSE`. The exception is
 `usb_dac.c`, which follows Raspberry Pi's BSD-3-Clause `usb_sound_card` for its
 descriptor layout and control requests, so it carries both licences (its header
