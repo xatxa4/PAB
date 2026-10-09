@@ -11,6 +11,43 @@ tag `sdk-2.1.1`; Pico SDK 2.1.1), and against binaries built from this tree.
 The first draft was written from a summary of upstream, and several of its
 assumptions did not hold. They are corrected below and marked **(changed)**.
 
+## Status
+
+All steps are implemented and on `main`; none has run on hardware yet.
+
+| Step | Commit |
+|---|---|
+| 0 USB stack vendored, console chosen after the mode | `c3c2bbe` |
+| A Enumerate | `98f8b3d` |
+| B 48 kHz playback | `1fcb13c` |
+| C Rates, depths, volume, mute | `a71a1ea` |
+| D Feedback | `3c9a716` |
+| E Charger fallback | `1ba1021` |
+
+Where the code differs from the text below, the code and its commit messages
+are right:
+
+- **Ring:** 4096 frames (a power of two for the index math, 32 KB), not 3345.
+- **Start gate:** one buffer plus 4 ms **plus 6 ms** for the main loop's period
+  and jitter. Without the extra 6 ms, 2 to 5 percent of simulated starts
+  underran once.
+- **Feedback (D10):** proportional only, Kp 8 (10.14 units per frame), tau
+  about 2 s, filter 1/16 per pass. The setpoint is the queue on the first pass
+  after the gate opens. Nominal is sent before that, after every stop or
+  underrun, and whenever the stored value would not fit the current rate.
+- **Unsupported rates (Step C)** are refused by stalling the status stage of
+  the SET_CUR, which the vendored stack supports from a packet handler.
+- **A stream generation** counter, bumped on every SET_INTERFACE and every rate
+  change, restarts playback from an empty ring. It catches an idle-and-back
+  between two loop passes.
+- **Step E** does not use a "no enumeration within 2 s" rule; that would drop
+  TVs and TV boxes, which power their ports long before they enumerate. It
+  recognises chargers electrically instead: D+ shorted to D- reads as line
+  state SE1 with our pull-up, which no host holds. A plain timeout exists as
+  `-DUSB_DAC_NO_HOST_FALLBACK_MS`, off by default.
+- **Host-testable code** lives in `src/usb_dac_pcm.h`: unpack, ring math, gain
+  table, feedback filter and controller, charger decision.
+
 ---
 
 ## 1. Will it work with my devices?

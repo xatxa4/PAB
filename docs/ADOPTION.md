@@ -40,6 +40,7 @@ to the tree the list was written against, before the fixes.
 | 0.4 AVDTP delay report: value, timing, tracking (found later) | **Done** | `9e76e01`…`c37cfa9` |
 | 0.5 Codec configuration buffer on the stack (found later) | **Done** | `f42bc52` |
 | 0.6 Stability audit (found later) | **Done** | `64eaa42`…`80cf4bc` |
+| USB sound card, steps 0–E of [`USB_DAC_PLAN.md`](USB_DAC_PLAN.md) (new personality) | **Done**, not on hardware | `c3c2bbe`…`1ba1021` |
 | 1.1 Mode descriptor | Open — next | |
 | 1.5 Watchdog | **Done** (in 0.6) | `e94cf18`, `80cf4bc` |
 | 1.5 Fault record, last-known-good mode | Open — after 1.1 | |
@@ -54,6 +55,14 @@ from a crash into working audio, and the `I2S : ... Hz ... ppm` line at stream
 start. For 0.6: pair a new phone while another streams (no noise burst from
 the flash write, `late refills` may count), pause a source until it closes the
 stream and resume, and disconnect from the phone and reconnect at once.
+
+The USB sound card rows were built against SDK 2.1.1 only, in the usb, uart and
+none console variants, and checked with host tests and closed-loop simulations
+rather than hardware. Its bench checks are listed per step in
+[`USB_DAC_PLAN.md`](USB_DAC_PLAN.md); first among them: Bluetooth mode with the
+USB console still boots (the vendored USB stack must leave the USB interrupt
+alone), the device enumerates as "PAB", and the once-a-second `queue ...
+feedback ... ppm` line holds still on Linux and Windows.
 
 ---
 
@@ -281,6 +290,12 @@ adding a row — not auditing every power measure in the tree. Without this,
 Tier 2 makes further development *more* fragile, which is precisely what must
 not happen.
 
+> **`preferred_sys_clk_hz` has a first customer.** The USB sound card never
+> brings the radio up, so in that mode alone `clk_sys` could run at a multiple
+> of the audio master clock, as upstream `usb_sound_card_hires` does, and the
+> PIO divider would become an integer: no fractional jitter on BCLK. The
+> Bluetooth sink cannot, because the CYW43 bus is clocked from `clk_sys` too.
+
 ### 1.2 `audio_out`: size buffers in time, not frames
 
 ```c
@@ -447,6 +462,10 @@ Everything is on: `CLK_ADC_ADC`, `CLK_SYS_ADC`, `CLK_RTC_RTC`, `CLK_SYS_RTC`,
 `CLK_SYS_I2C0/1`, `CLK_SYS_SPI0/1`, `CLK_PERI_SPI0/1`, `CLK_SYS_PWM`,
 `CLK_SYS_JTAG`, `CLK_SYS_UART0/1`, `CLK_PERI_UART0/1`, `CLK_SYS_USBCTRL`,
 `CLK_USB_USBCTRL`. The Bluetooth sink uses none of them **today**.
+
+> **The USB sound card needs two of them.** `CLK_SYS_USBCTRL` and
+> `CLK_USB_USBCTRL`, with PLL_USB behind `clk_usb`, are on the keep list in that
+> mode and only there. Another argument for 1.1: the mode exists now.
 
 > **The I2C display and encoder change this.** `CLK_SYS_I2C0` moves to the keep
 > list the moment the OLED lands, and 2.2 must leave I2C0 out of reset. This is
