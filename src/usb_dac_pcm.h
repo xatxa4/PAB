@@ -188,4 +188,77 @@ static inline int32_t usb_dac_fb_ppm(uint32_t fb, uint32_t nominal){
     return (int32_t) (((int64_t) fb - (int64_t) nominal) * 1000000 / (int64_t) nominal);
 }
 
+// ---- charger detection ------------------------------------------------------
+//
+// A box in sound card mode on a phone charger has no host and is silently
+// useless. A dedicated charger (BC1.2 DCP) shorts D+ to D-; with our D+ pull-up
+// on, both lines then read high, which the controller reports as line state
+// SE1 (3). A host never holds SE1, so seeing it for a while, with no address
+// ever assigned, means "charger". What a host does NOT look like is just
+// "quiet for N seconds": TVs and TV boxes power their ports long before their
+// OS enumerates, so a plain timeout would drop exactly those into Bluetooth.
+
+#define USB_DAC_LINE_SE0 0u
+#define USB_DAC_LINE_J   1u
+#define USB_DAC_LINE_K   2u
+#define USB_DAC_LINE_SE1 3u     // as the SDK's rp2040_usb_device_enumeration.c names them
+
+/// A gap between samples longer than this is not "every sample": restart the
+/// count rather than vouch for time nobody looked at.
+#define USB_DAC_CHARGER_MAX_GAP_MS 100u
+
+enum usb_dac_charger_verdict {
+    USB_DAC_CHARGER_KEEP_GOING = 0,
+    USB_DAC_CHARGER_IS_CHARGER,     // SE1 held, no host ever addressed us
+    USB_DAC_CHARGER_NO_HOST,        // secondary criterion only: never addressed in time
+};
+
+struct usb_dac_charger {
+    bool     se1_run;           // the current run of SE1 samples
+    bool     host_seen;         // an address was seen once: never fall back again
+    uint32_t se1_since_ms;
+    uint32_t last_ms;
+    bool     have_last;
+};
+
+static inline void usb_dac_charger_init(struct usb_dac_charger * c){
+    c->se1_run = false;
+    c->host_seen = false;
+    c->se1_since_ms = 0;
+    c->last_ms = 0;
+    c->have_last = false;
+}
+
+/// One sample. elapsed_ms counts from usb_device_start(); line_state is the
+/// controller's 2 bit LINE_STATE; address_seen is "dev_addr_ctrl's address is
+/// nonzero right now". The primary criterion looks only at the first
+/// window_ms; se1_ms of unbroken SE1 are needed. no_host_ms == 0 disables the
+/// secondary criterion, otherwise it fires when no address has been seen by
+/// then, wherever the line is.
+static inline enum usb_dac_charger_verdict usb_dac_charger_step(
+        struct usb_dac_charger * c, uint32_t elapsed_ms, uint32_t line_state,
+        bool address_seen, uint32_t window_ms, uint32_t se1_ms, uint32_t no_host_ms){
+    if (address_seen) c->host_seen = true;
+    if (c->host_seen) return USB_DAC_CHARGER_KEEP_GOING;
+
+    if (no_host_ms && elapsed_ms >= no_host_ms) return USB_DAC_CHARGER_NO_HOST;
+
+    if (c->have_last && elapsed_ms - c->last_ms > USB_DAC_CHARGER_MAX_GAP_MS){
+        c->se1_run = false;
+    }
+    c->last_ms = elapsed_ms;
+    c->have_last = true;
+
+    if (elapsed_ms > window_ms || line_state != USB_DAC_LINE_SE1){
+        c->se1_run = false;
+        return USB_DAC_CHARGER_KEEP_GOING;
+    }
+    if (!c->se1_run){
+        c->se1_run = true;
+        c->se1_since_ms = elapsed_ms;
+    }
+    if (elapsed_ms - c->se1_since_ms >= se1_ms) return USB_DAC_CHARGER_IS_CHARGER;
+    return USB_DAC_CHARGER_KEEP_GOING;
+}
+
 #endif

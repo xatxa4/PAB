@@ -59,6 +59,13 @@ app_mode_t app_mode_next(void);
 /// Does not return.
 void app_mode_switch_to(app_mode_t mode);
 
+/// Reboot into mode for this boot only. Never touches flash, so the stored mode
+/// is unchanged and the next power-up (or the next reboot that carries no
+/// request) comes back as before. For a decision the box makes by itself, such
+/// as "no host, only a charger", which must not outlive the situation that
+/// caused it. Does not return.
+void app_mode_boot_once(app_mode_t mode);
+
 /// Convenience for a single button: switch to the next mode in the cycle.
 /// Does not return.
 void app_mode_switch_next(void);

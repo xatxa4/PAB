@@ -90,6 +90,14 @@ app_mode_t app_mode_current(void){
     return current;
 }
 
+// The one place the scratch tag is built, so a one-off boot and a stored switch
+// cannot disagree about its format (app_mode_current() reads it back).
+static void reboot_into(app_mode_t mode){
+    watchdog_hw->scratch[SCRATCH_INDEX] = SCRATCH_TAG | (uint32_t) mode;
+    watchdog_reboot(0, 0, 0);
+    while (true) tight_loop_contents();
+}
+
 void app_mode_switch_to(app_mode_t mode){
     if (mode >= APP_MODE_COUNT) mode = APP_MODE_BT_SINK;
 
@@ -104,10 +112,16 @@ void app_mode_switch_to(app_mode_t mode){
     }
 
     printf("MODE            : switching to %s\n", app_mode_name(mode));
+    reboot_into(mode);
+}
 
-    watchdog_hw->scratch[SCRATCH_INDEX] = SCRATCH_TAG | (uint32_t) mode;
-    watchdog_reboot(0, 0, 0);
-    while (true) tight_loop_contents();
+void app_mode_boot_once(app_mode_t mode){
+    if (mode >= APP_MODE_COUNT) mode = APP_MODE_BT_SINK;
+
+    // no flash here: the next cold start must come back as it was stored
+    printf("MODE            : booting %s this time only, stored mode unchanged\n",
+           app_mode_name(mode));
+    reboot_into(mode);
 }
 
 app_mode_t app_mode_next(void){

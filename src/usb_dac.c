@@ -86,6 +86,7 @@
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 #include "pico/usb_device.h"
+#include "hardware/structs/usb.h"
 #include "hardware/sync.h"
 #include "hardware/watchdog.h"
 
@@ -110,6 +111,29 @@
 
 #ifndef PICO_AUDIO_I2S_NUM_BUFFERS
 #define PICO_AUDIO_I2S_NUM_BUFFERS 4    // as in audio_out.c
+#endif
+
+// Charger detection, see usb_dac_pcm.h for why it looks at the wires and not at
+// the clock. Dedicated chargers short D+ to D-, which reads as SE1 with our
+// pull-up on; that for this long, with no host ever having addressed us,
+// means a charger.
+#ifndef USB_DAC_CHARGER_SE1_MS
+#define USB_DAC_CHARGER_SE1_MS 250
+#endif
+// Only the start is judged. A host that has not spoken by then is not a
+// charger just because it is slow, and a cable plugged in later is not ours to
+// second-guess.
+#ifndef USB_DAC_CHARGER_WINDOW_MS
+#define USB_DAC_CHARGER_WINDOW_MS 3000
+#endif
+// Off by default: also fall back when no address was assigned within this many
+// ms (0 = never). A slow-booting TV or box cannot be told apart from a supply
+// whose data lines just float, and the cost of being wrong - no sound card
+// until replugged - is worse than the problem this solves. Turn it on for
+// power banks and plain 5 V supplies that do not short D+/D-, if every host
+// you use enumerates promptly.
+#ifndef USB_DAC_NO_HOST_FALLBACK_MS
+#define USB_DAC_NO_HOST_FALLBACK_MS 0
 #endif
 
 // What the board draws is not known yet. Measure it with the DAC attached and
@@ -760,6 +784,8 @@ static struct usb_interface as_interface;
 static struct usb_endpoint ep_audio_out, ep_feedback;
 static struct usb_transfer audio_out_transfer, feedback_transfer;
 
+static uint32_t device_started_us;     // main loop only: time_us_32() at usb_device_start()
+
 static void usb_dac_start_device(void){
     pico_get_unique_board_id_string(serial_string, sizeof(serial_string));
 
@@ -786,6 +812,7 @@ static void usb_dac_start_device(void){
         return;
     }
     usb_device_start();
+    device_started_us = time_us_32();
 }
 
 // ---- playback (main loop) ---------------------------------------------------
@@ -1043,6 +1070,54 @@ static void report_counters(void){
     }
 }
 
+// Main loop, every pass, so SE1 is judged on samples a few ms apart. A host
+// that has addressed us latches the detector for good: the address stays
+// until the next bus reset and survives any later quiet spell.
+//
+// Falling back is a one-off Bluetooth boot (no flash write), so a later plug
+// into a real host is a sound card again. On the same charger BOOTSEL would
+// bring this mode back and it would fall back again, which is fine: a charger
+// gets Bluetooth either way. The sink's own reboot after a session returns to
+// the stored mode and gets here again; that needs a session to end first and
+// takes a boot plus ~250 ms, so it cannot loop faster than a boot, and the
+// watchdog is armed in main() and fed every pass of this loop throughout.
+static void charger_check(void){
+    static struct usb_dac_charger charger;
+    static bool started;
+    // Retired for good once a host has addressed us or every criterion's time
+    // is up: the elapsed count wraps after about 71 minutes, and must not open
+    // the window again then.
+    static bool retired;
+    if (retired) return;
+    if (!started){
+        usb_dac_charger_init(&charger);
+        started = true;
+    }
+
+    uint32_t elapsed_ms = (uint32_t) (time_us_32() - device_started_us) / 1000u;
+    uint32_t line = (usb_hw->sie_status & USB_SIE_STATUS_LINE_STATE_BITS) >> USB_SIE_STATUS_LINE_STATE_LSB;
+    bool addressed = (usb_hw->dev_addr_ctrl & USB_ADDR_ENDP_ADDRESS_BITS) != 0;
+
+    enum usb_dac_charger_verdict v = usb_dac_charger_step(&charger, elapsed_ms, line, addressed,
+            USB_DAC_CHARGER_WINDOW_MS, USB_DAC_CHARGER_SE1_MS, USB_DAC_NO_HOST_FALLBACK_MS);
+    if (v == USB_DAC_CHARGER_KEEP_GOING){
+        uint32_t last_ms = USB_DAC_CHARGER_WINDOW_MS > USB_DAC_NO_HOST_FALLBACK_MS
+                         ? USB_DAC_CHARGER_WINDOW_MS : USB_DAC_NO_HOST_FALLBACK_MS;
+        if (addressed || elapsed_ms > last_ms) retired = true;
+        return;
+    }
+
+    if (v == USB_DAC_CHARGER_IS_CHARGER){
+        printf("USB DAC         : no host, a charger on D+/D- - booting Bluetooth this time\n");
+    } else {
+        printf("USB DAC         : no host within %lu ms - booting Bluetooth this time\n",
+               (unsigned long) USB_DAC_NO_HOST_FALLBACK_MS);
+    }
+    gpio_put(CONN_PIN, 0);
+    audio_out_stop();       // the watchdog reset takes care of the rest
+    app_mode_boot_once(APP_MODE_BT_SINK);
+}
+
 void usb_dac_run(void){
     gpio_init(CONN_PIN);
     gpio_set_dir(CONN_PIN, GPIO_OUT);
@@ -1066,6 +1141,7 @@ void usb_dac_run(void){
         feedback_update();      // right after the refill, see there
         report_changes();
         report_counters();
+        charger_check();
         mode_button_poll();     // rate limits itself
         watchdog_update();
         sleep_ms(audio_out_service_interval_ms());

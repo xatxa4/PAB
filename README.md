@@ -34,6 +34,24 @@ The mode is put in a watchdog scratch register, which survives the reset, and
 written to flash so a cold start comes back the same way. Flash is only touched
 when the mode actually changes.
 
+**Charger fallback.** A box left in sound card mode and powered from a phone
+charger has no host. The sound card watches the USB data lines for the first
+three seconds: dedicated chargers short D+ to D-, which with our pull-up reads
+as a line state no host ever holds, and after a quarter second of that, with no
+host ever having addressed the box, it boots Bluetooth for this boot only. The
+stored mode is not touched (no flash write), so plugging into a real host later
+comes back as a sound card. Only chargers that short D+/D- are recognised (most
+wall chargers); some power banks and plain 5 V supplies are not, and then the
+box stays a silent sound card until you switch with BOOTSEL. BOOTSEL in the
+fallback boot goes to the stored sound card mode, which on the same charger
+falls back again, so the charger gets Bluetooth either way; and the Bluetooth
+sink's reboot after a session ends does the same, a boot plus a quarter second
+later. There is deliberately no plain "no host within N seconds" rule, since a
+TV may power its port long before it enumerates anything. If you want one,
+`-DUSB_DAC_NO_HOST_FALLBACK_MS=10000` falls back when nothing has addressed the
+box by then, at the price that a slow host also lands in Bluetooth and the
+sound card is gone until replugged. Not run on hardware yet.
+
 Two things worth knowing:
 
 - After the three slow flashes, the LED blinks quickly until you let go of
