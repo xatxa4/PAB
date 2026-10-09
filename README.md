@@ -107,7 +107,8 @@ advice; if you intend to sell a product based on this, take proper counsel.
 |---|---|---|
 | `src/a2dp.c`, `avrcp.c`, `bt.c`, `sdp.c`, `main.c`, `btstack_audio_pico_i2s.*` | BlueKitchen GmbH; joba-1; xatxa4 | BlueKitchen BTstack licence (BSD-3-Clause **plus a non-commercial clause**) |
 | `src/audio_out.c` | BambooMaster; xatxa4 | MIT |
-| `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.*` | xatxa4 | MIT |
+| `src/audio_out.h`, `app_mode.*`, `mode_button.*`, `usb_dac.h` | xatxa4 | MIT |
+| `src/usb_dac.c` | Raspberry Pi (Trading) Ltd.; BambooMaster; xatxa4 | BSD-3-Clause AND MIT |
 | `pico_i2s_pio/` (vendored, incl. `i2s.pio`) | BambooMaster | MIT — see `pico_i2s_pio/LICENSE` |
 | `pico_usb_device/` (vendored) | Raspberry Pi (Trading) Ltd.; one patch from BambooMaster's fork, one from xatxa4 | BSD-3-Clause — see `pico_usb_device/LICENSE` |
 | Raspberry Pi Pico SDK (linked) | Raspberry Pi (Trading) Ltd. | BSD-3-Clause |
@@ -139,8 +140,11 @@ summary.
 ## What this means in practice
 
 The original work in this project (`audio_out.h`, `app_mode.*`, `mode_button.*`,
-`usb_dac.*`, and this project's own changes throughout) is offered under the **MIT Licence** —
-the most permissive of the licences involved. See `LICENSE`.
+`usb_dac.h`, and this project's own changes throughout) is offered under the **MIT Licence** —
+the most permissive of the licences involved. See `LICENSE`. The exception is
+`usb_dac.c`, which follows Raspberry Pi's BSD-3-Clause `usb_sound_card` for its
+descriptor layout and control requests, so it carries both licences (its header
+says which part is which).
 
 That permission applies only to this project's own contributions. It cannot and
 does not relicense anyone else's code, and **the terms of the combined work are
