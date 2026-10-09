@@ -22,10 +22,10 @@ an S/PDIF receiver could follow.
 
 The box has two personalities: the Bluetooth sink, and a USB sound card. The
 sound card plays 16 and 24 bit stereo at 44.1, 48, 88.2 and 96 kHz, and the
-host's volume and mute work; GP26 is high while it plays. The feedback that
-keeps the host's clock and the DAC's together is still next, so a long stream
-drifts, and the console counts the audio it drops or pads. It has only been
-compiled, not yet run on a host.
+host's volume and mute work; GP26 is high while it plays. Feedback keeps the
+host's clock and the DAC's together on hosts that follow it: the console shows
+the queue and the correction once a second, and counts any audio it drops or
+pads. It has only been compiled and simulated, not yet run on a host.
 
 **Hold BOOTSEL for about a fifth of a second to switch to the other mode.** The
 onboard LED flashes three times slowly, and the Pico reboots into the new mode.

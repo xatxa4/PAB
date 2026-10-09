@@ -61,9 +61,11 @@
  * packets into 32 bit frames and call audio_out_service() from this loop. This
  * file is the USB half. At this stage the device enumerates, answers the class
  * requests and plays 16 and 24 bit audio at 44.1, 48, 88.2 and 96 kHz, with
- * the host's volume and mute applied. The feedback endpoint still sends the
- * nominal value, so the ring between the USB interrupt and the output slowly
- * drifts and drops or pads audio, counted.
+ * the host's volume and mute applied. The feedback endpoint steers the host's
+ * packet sizes so that the queue between the USB interrupt and the output
+ * stays where it started, instead of drifting until audio is dropped or
+ * padded (counted). A host that ignores the feedback shows up in the log as a
+ * queue that walks away while the correction sits at its limit.
  *
  * The control-request, alternate-setting and endpoint handlers run in the USB
  * interrupt, so they only touch the small state struct and the ring and never
@@ -84,6 +86,7 @@
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 #include "pico/usb_device.h"
+#include "hardware/sync.h"
 #include "hardware/watchdog.h"
 
 #include "audio_out.h"
@@ -98,6 +101,16 @@
 // Slack the start gate waits for on top of one output buffer, in milliseconds
 // of audio at the current rate (176 frames at 44.1 kHz, 384 at 96 kHz).
 #define USB_DAC_START_MARGIN_MS 4u
+// Added to the gate on top of that: the main loop wakes every 5 ms (plus
+// jitter) and the buffer playing is anywhere in that period when the queue is
+// measured, so the queue held can sit this much below the level at the gate.
+// Waiting for it up front keeps the 4 ms margin whatever the phase, and the
+// loop never has to pull the queue up by it over its 2 s time constant.
+#define USB_DAC_START_PHASE_MS 6u
+
+#ifndef PICO_AUDIO_I2S_NUM_BUFFERS
+#define PICO_AUDIO_I2S_NUM_BUFFERS 4    // as in audio_out.c
+#endif
 
 // What the board draws is not known yet. Measure it with the DAC attached and
 // set this to that plus a margin: iPhones and iPads (and some hubs and OTG
@@ -447,7 +460,8 @@ static struct {
 // frames at the highest rate, 11610 us each), and 32 KB of RAM. The most the
 // ring has to hold is the start threshold, one more buffer that the output
 // takes in the meantime, and the packet that arrives on top:
-// 1115 + 384 + 1115 + 97 = 2711 frames at 96 kHz.
+// 1115 + 384 + 1115 + 97 = 2711 frames at 96 kHz, and 576 more for the phase
+// allowance on the threshold: 3287.
 #define USB_DAC_RING_FRAMES    4096u
 static_assert((USB_DAC_RING_FRAMES & (USB_DAC_RING_FRAMES - 1)) == 0,
               "the ring index math masks with capacity - 1");
@@ -457,7 +471,8 @@ static_assert(USB_DAC_RING_FRAMES >=
               "the ring must hold 3 audio_out buffers at the highest rate");
 static_assert(USB_DAC_RING_FRAMES >=
               2 * (((uint64_t) PICO_AUDIO_I2S_MAX_SAMPLE_RATE * PICO_AUDIO_I2S_BUFFER_US + 500000) / 1000000)
-              + (uint64_t) PICO_AUDIO_I2S_MAX_SAMPLE_RATE * USB_DAC_START_MARGIN_MS / 1000 + 97,
+              + (uint64_t) PICO_AUDIO_I2S_MAX_SAMPLE_RATE
+                * (USB_DAC_START_MARGIN_MS + USB_DAC_START_PHASE_MS) / 1000 + 97,
               "the ring must hold the start threshold, a buffer and a packet at the highest rate");
 #endif
 
@@ -483,6 +498,11 @@ static volatile uint32_t last_packet_us;    // time_us_32() of the last packet w
 static volatile uint32_t ring_underruns;    // fill had to pad
 static volatile uint32_t ring_overruns;     // packet dropped, ring full
 static volatile uint32_t packets_discarded; // packet dropped while a change was in progress
+
+// What the main loop wants the feedback endpoint to send, 10.14 as the host
+// reads it; 0 means the nominal value for dac_state.rate. A single aligned
+// 32 bit word, so the interrupt can never see half of an update.
+static volatile uint32_t feedback_value;
 
 static bool rate_supported(uint32_t rate){
     for (int i = 0; i < RATE_COUNT; i++){
@@ -710,7 +730,13 @@ static void audio_out_packet(struct usb_endpoint *ep){
 static void feedback_packet(struct usb_endpoint *ep){
     assert(ep->current_transfer);
     struct usb_buffer *buffer = usb_current_in_packet_buffer(ep);
-    uint32_t fb = feedback_nominal(dac_state.rate);
+    uint32_t nominal = feedback_nominal(dac_state.rate);
+    uint32_t fb = feedback_value;
+    // The main loop clears this when a stream ends, but a rate change can land
+    // in between: a value made for another rate is far outside this one's
+    // clamp, and the host must not be told it.
+    uint32_t limit = nominal / USB_DAC_FB_CLAMP_DIV;
+    if (fb == 0 || fb > nominal + limit || fb + limit < nominal) fb = nominal;
     buffer->data[0] = (uint8_t) fb;
     buffer->data[1] = (uint8_t) (fb >> 8);
     buffer->data[2] = (uint8_t) (fb >> 16);
@@ -765,6 +791,8 @@ static void usb_dac_start_device(void){
 // ---- playback (main loop) ---------------------------------------------------
 
 static bool gate_open;      // main loop only, see dac_fill
+static bool gate_just_opened;   // main loop only: feedback_update() takes its setpoint from this pass
+static bool playing;        // main loop only: the output runs and the ring is being filled
 
 // Called by audio_out_service() from the main loop. Always writes num_frames:
 // audio_out reuses its buffers, so anything left unwritten would play twice.
@@ -777,12 +805,14 @@ static void dac_fill(int32_t * dst, uint32_t num_frames, void * context){
     // it trickles in would play audio, silence, audio. So whole buffers of
     // silence until a buffer and a margin are queued, then audio from there on.
     if (!gate_open){
-        uint32_t margin = audio_out_sample_rate() * USB_DAC_START_MARGIN_MS / 1000u;
+        uint32_t margin = audio_out_sample_rate()
+                          * (USB_DAC_START_MARGIN_MS + USB_DAC_START_PHASE_MS) / 1000u;
         if (level < audio_out_frames_per_buffer() + margin){
             memset(dst, 0, (size_t) num_frames * 2 * sizeof(int32_t));
             return;
         }
         gate_open = true;
+        gate_just_opened = true;
     }
 
     uint32_t n = level < num_frames ? level : num_frames;
@@ -800,6 +830,7 @@ static void dac_fill(int32_t * dst, uint32_t num_frames, void * context){
         memset(dst + 2 * n, 0, (size_t) (num_frames - n) * 2 * sizeof(int32_t));
         ring_underruns++;
         gate_open = false;
+        gate_just_opened = false;
     }
 }
 
@@ -821,10 +852,63 @@ static void apply_volume(void){
     audio_out_set_volume(mute ? 0 : (int32_t) usb_dac_volume_gain(volume));
 }
 
+// ---- feedback control (main loop) -------------------------------------------
+
+static struct usb_dac_fb fb_state;
+
+// Back to sending the nominal value: no stream, a stream starting, or the
+// output has run dry and the ring is refilling.
+static void feedback_reset(void){
+    usb_dac_fb_reset(&fb_state);
+    feedback_value = 0;
+}
+
+// Measures the queue (ring plus what audio_out holds) and steers the host.
+// Called right after audio_out_service(), because that is when the queue is
+// smooth: a refill moves frames from the ring to the output, and the sum is
+// the same before and after. Both reads sit in one interrupt-free window so
+// the USB interrupt cannot add a packet between them, and it is the main
+// loop, not the feedback interrupt, that measures: from there a refill caught
+// half way has frames that are counted in neither place.
+static void feedback_update(void){
+    static uint32_t last_log_us;
+
+    if (!playing || !gate_open){
+        // the same reset covers a gate that closed on an underrun
+        if (fb_state.active) feedback_reset();
+        return;
+    }
+
+    uint32_t saved = save_and_disable_interrupts();
+    uint32_t queued = audio_out_queued_frames();
+    uint32_t total = usb_dac_ring_level(write_index, read_index) + queued;
+    restore_interrupts(saved);
+
+    uint32_t nominal = feedback_nominal(dac_state.rate);
+    if (gate_just_opened){
+        // The level to hold is the one measured now: the gate already waited
+        // for the phase allowance, so this is not below what the margin needs.
+        gate_just_opened = false;
+        usb_dac_fb_start(&fb_state, total);
+        last_log_us = time_us_32() - 1000000u;      // say so at once
+    }
+    if (!fb_state.active) return;
+
+    uint32_t fb = usb_dac_fb_update(&fb_state, total, nominal);
+    feedback_value = fb;
+
+    uint32_t now = time_us_32();
+    if ((uint32_t) (now - last_log_us) >= 1000000u){
+        last_log_us = now;
+        printf("USB DAC         : queue %ld (target %ld), feedback %+ld ppm\n",
+               (long) (fb_state.filtered_q8 / 256), (long) fb_state.setpoint,
+               (long) usb_dac_fb_ppm(fb, nominal));
+    }
+}
+
 // Decides from the main loop, not the interrupt, whether the output plays.
 // audio_out_stop() and audio_out_start() are not for interrupt context.
 static void stream_update(void){
-    static bool playing;
     static uint8_t played_alt;
     static uint32_t played_rate;
     static uint32_t played_generation;
@@ -860,6 +944,7 @@ static void stream_update(void){
         audio_out_stop();
         accepting = false;
         playing = false;
+        feedback_reset();
         gpio_put(CONN_PIN, 0);
         printf("USB DAC         : stopped (%s)\n",
                alt == 0 ? "idle" : rate != played_rate ? "rate changed" :
@@ -884,6 +969,8 @@ static void stream_update(void){
             printf("USB DAC         : cannot play %lu Hz\n", (unsigned long) rate);
         } else {
             gate_open = false;
+            gate_just_opened = false;
+            feedback_reset();
             accepting = true;
             played_alt = alt;
             played_rate = rate;
@@ -976,6 +1063,7 @@ void usb_dac_run(void){
         apply_volume();
         stream_update();
         audio_out_service();    // without a fill callback this plays silence
+        feedback_update();      // right after the refill, see there
         report_changes();
         report_counters();
         mode_button_poll();     // rate limits itself

@@ -30,7 +30,8 @@
 /*
  * Pure helpers for the USB sound card's data path: unpacking a packet of PCM
  * into the 32 bit frames audio_out wants, the index arithmetic of the ring
- * between the USB interrupt and the main loop, and the volume to gain table.
+ * between the USB interrupt and the main loop, the volume to gain table and the
+ * feedback filter and controller.
  * They include nothing from the SDK so that a host compiler can check them against hand-computed values.
  */
 
@@ -113,6 +114,78 @@ static inline uint32_t usb_dac_volume_gain(int16_t volume_8_8){
     if (db > 0) db = 0;
     if (db < USB_DAC_VOLUME_MIN_DB) db = USB_DAC_VOLUME_MIN_DB;
     return usb_dac_gain_table[-db];
+}
+
+// ---- feedback ---------------------------------------------------------------
+//
+// The host sends, every 1 ms, fb / 16384 frames (10.14 fixed point, the
+// fraction carried over), using the last value it read from the feedback
+// endpoint. Our DAC eats frames at its own clock, so the queue (ring plus what
+// audio_out holds) walks away from where it started unless the value is
+// steered. The queue is measured, low-pass filtered, and the value is
+// nominal plus a correction proportional to the error. All integers.
+//
+// Loop dynamics. With e the queue error in frames and d the drift in frames
+// per second, a correction of Kp units (10.14) per frame of error changes the
+// host's rate by Kp / 16384 frames per ms per frame of error, so
+//     de/dt = -(Kp * 1000 / 16384) * e - d
+// a first order loop with tau = 16384 / (1000 * Kp) seconds and, for a
+// constant drift, a steady state error e = -d / (Kp * 1000 / 16384). Kp = 8
+// gives tau = 2.05 s, so the loop is slow next to the filter below (about
+// 80 ms) and next to the 8 ms the host takes to read the value and the 1 to 2
+// ms it takes to act on it: no sustained oscillation is possible.
+//
+// What a proportional loop leaves behind: it holds the queue e frames off its
+// setpoint to produce a correction of d. For 300 ppm that is e = 59 frames at
+// 96 kHz (472 units / 8) and 27 at 44.1 kHz, against start margins of 384 and
+// 176 frames. Under a sixth of the margin, so there is no integral term.
+
+#define USB_DAC_FB_KP            8          // 10.14 units per frame of error
+#define USB_DAC_FB_FILTER_SHIFT  4          // alpha = 1/16 per ~5 ms pass
+#define USB_DAC_FB_CLAMP_DIV     128        // nominal +/- nominal / 128, as upstream
+
+struct usb_dac_fb {
+    bool    active;         // false: send the nominal value
+    int32_t setpoint;       // frames
+    int32_t filtered_q8;    // queue, low-passed, frames * 256
+};
+
+static inline void usb_dac_fb_reset(struct usb_dac_fb * f){
+    f->active = false;
+    f->setpoint = 0;
+    f->filtered_q8 = 0;
+}
+
+/// Takes the queue measured now as the level to hold, and starts steering from
+/// the measurement itself so the first pass is no step. The start gate has
+/// already waited for the main loop's phase allowance, so the level is safe.
+static inline void usb_dac_fb_start(struct usb_dac_fb * f, uint32_t total_frames){
+    f->setpoint = (int32_t) total_frames;
+    f->filtered_q8 = (int32_t) (total_frames * 256u);   // no step on the first pass
+    f->active = true;
+}
+
+/// Feeds one measurement of the queue in frames, returns the 10.14 feedback
+/// value to send. The queue is a few thousand frames at most, so Q8 and the
+/// product below stay far inside 32 and 64 bits at 96 kHz.
+static inline uint32_t usb_dac_fb_update(struct usb_dac_fb * f, uint32_t total_frames, uint32_t nominal){
+    if (!f->active) return nominal;
+    int32_t x = (int32_t) (total_frames * 256u);
+    // division, not a shift of a possibly negative value; it rounds towards
+    // zero, so the filter stops within 15/256 of a frame of its input
+    f->filtered_q8 += (x - f->filtered_q8) / (1 << USB_DAC_FB_FILTER_SHIFT);
+    // queue above the setpoint: ask for fewer frames, and the other way round
+    int64_t err_q8 = (int64_t) f->setpoint * 256 - f->filtered_q8;
+    int64_t corr = err_q8 * USB_DAC_FB_KP / 256;
+    int64_t limit = nominal / USB_DAC_FB_CLAMP_DIV;
+    if (corr > limit) corr = limit;
+    if (corr < -limit) corr = -limit;
+    return (uint32_t) ((int64_t) nominal + corr);
+}
+
+/// (fb - nominal) in parts per million, for the log.
+static inline int32_t usb_dac_fb_ppm(uint32_t fb, uint32_t nominal){
+    return (int32_t) (((int64_t) fb - (int64_t) nominal) * 1000000 / (int64_t) nominal);
 }
 
 #endif
