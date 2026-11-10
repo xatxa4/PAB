@@ -22,6 +22,10 @@ pico_sdk_init()
 # and newer SDKs ship a BTstack whose pairing defaults changed.
 if (PICO_SDK_VERSION_STRING VERSION_LESS "2.1.1")
     message(WARNING "PAB is tested with Pico SDK 2.1.1; ${PICO_SDK_VERSION_STRING} lacks CYW43 driver fixes from 2.1.x")
+elseif (NOT PICO_SDK_VERSION_STRING VERSION_LESS "2.3.0")
+    # 2.2.0 ships the same BTstack as 2.1.1; 2.3 ships a newer one, and a2dp.c
+    # reaches into BTstack's A2DP state, which has not been checked against it.
+    message(WARNING "PAB is tested with Pico SDK 2.1.1; ${PICO_SDK_VERSION_STRING} ships a newer BTstack that PAB has not been checked against. Use SDK 2.1.1 or 2.2.0 for a known-good build.")
 elseif (PICO_SDK_VERSION_STRING VERSION_GREATER "2.1.1")
     message(STATUS "PAB is tested with Pico SDK 2.1.1; building with ${PICO_SDK_VERSION_STRING}")
 endif()
