@@ -163,6 +163,21 @@ bool _media_initialized = false;
 bool _audio_stream_started = false;
 unsigned _sbc_frame_size = 0;
 btstack_resample_t _resample_instance = {0};
+
+// Drift correction. The resampler interpolates linearly between two input
+// samples, which is transparent only when it reads exactly on a sample: half
+// way between two it is a low pass, about 6 dB down at 15 kHz. Each correction
+// leaves its read position at an arbitrary fraction, and BTstack's demo then
+// stays there at the nominal rate - so after the first correction the treble
+// came and went with wherever the position happened to rest. Here the last
+// stretch of a correction is steered so that the position ends on a sample,
+// and only then does the rate go back to nominal: with no correction running,
+// the samples pass through bit for bit.
+#define RESAMPLE_NOMINAL       0x10000u     // 16.16
+#define RESAMPLE_COMPENSATION  0x00100u     // 0.39 %, the rate of a correction
+#define RESAMPLE_SNAP          0x00200u     // 1/128 sample: close enough to step onto the sample
+static uint32_t _resample_wanted   = RESAMPLE_NOMINAL;  // what the queue depth asks for
+static bool     _resample_off_grid = false;             // position may be between samples
 btstack_ring_buffer_t _sbc_frame_ring_buffer = {0};
 btstack_ring_buffer_t _decoded_audio_ring_buffer = {0};
 uint8_t _sbc_frame_storage[OPTIMAL_FRAMES_MAX * MAX_SBC_BYTES_PER_FULL_FRAME + ADDITIONAL_FRAMES * MAX_SBC_FRAME_SIZE] = {0};
@@ -202,6 +217,42 @@ static uint8_t  _delay_attempts;
 // send decoded frames to the i2s buffer or ringbuffer. Volume is applied by the
 // sink, in the 32 bit domain - attenuating here first would throw away
 // resolution the DAC can actually render.
+/// Picks the resampler's rate for the next block of num_frames input frames.
+/// A correction the queue asks for is applied as it is. Once the queue is back
+/// in its band, the read position is first walked onto a sample, no faster
+/// than a correction runs and the short way round, then the rate is nominal.
+static void resample_prepare(int num_frames){
+    if (_resample_wanted != RESAMPLE_NOMINAL){
+        btstack_resample_set_factor(&_resample_instance, _resample_wanted);
+        _resample_off_grid = true;
+        return;
+    }
+    if (!_resample_off_grid) return;    // on a sample, at the nominal rate
+
+    uint32_t below = _resample_instance.src_pos & 0xffffu;      // past the sample behind
+    uint32_t above = (0x10000u - below) & 0xffffu;              // short of the sample ahead
+    if (below < RESAMPLE_SNAP || above < RESAMPLE_SNAP){
+        // at most 1/128 of a sample off: step onto it (unsigned wrap is what
+        // the resampler's own position arithmetic does)
+        if (below < RESAMPLE_SNAP){
+            _resample_instance.src_pos -= below;
+        } else {
+            _resample_instance.src_pos += above;
+        }
+        btstack_resample_set_factor(&_resample_instance, RESAMPLE_NOMINAL);
+        _resample_off_grid = false;
+        return;
+    }
+    uint32_t frames = num_frames > 0 ? (uint32_t) num_frames : 1u;
+    if (below < 0x8000u){
+        uint32_t step = btstack_min(below / frames, RESAMPLE_COMPENSATION);
+        btstack_resample_set_factor(&_resample_instance, RESAMPLE_NOMINAL - step);
+    } else {
+        uint32_t step = btstack_min(above / frames, RESAMPLE_COMPENSATION);
+        btstack_resample_set_factor(&_resample_instance, RESAMPLE_NOMINAL + step);
+    }
+}
+
 static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channels, int sample_rate, void * context) {
     UNUSED(sample_rate);
     UNUSED(context);
@@ -213,6 +264,7 @@ static void handle_pcm_data(int16_t * data, int num_audio_frames, int num_channe
     }
 
     // resample into request buffer - add some additional space for resampling
+    resample_prepare(num_audio_frames);
     int16_t  output_buffer[(128+16) * NUM_CHANNELS]; // 16 * 8 * 2
     uint32_t resampled_frames = btstack_resample_block(&_resample_instance, data, num_audio_frames, output_buffer);
 
@@ -307,6 +359,8 @@ static void media_processing_init(sbc_configuration_t * configuration) {
     // channel, the resampler read half of each frame and the rest of the
     // output was whatever lay on the stack: noise in every frame.
     btstack_resample_init(&_resample_instance, NUM_CHANNELS);
+    _resample_wanted   = RESAMPLE_NOMINAL;
+    _resample_off_grid = false;
 
     // setup audio playback
     const btstack_audio_sink_t * audio = btstack_audio_sink_get_instance();
@@ -881,21 +935,15 @@ static void media_handler(uint8_t seid, uint8_t *packet, uint16_t size) {
     unsigned queued_frames     = btstack_ring_buffer_bytes_available(&_sbc_frame_ring_buffer) / _sbc_frame_size;
     int sbc_frames_in_buffer   = (int) ((queued_frames * samples_per_frame) / FULL_FRAME_SAMPLES);
 
-    uint32_t resampling_factor;
-
-    // nominal factor (fixed-point 2^16) and compensation offset
-    uint32_t nominal_factor = 0x10000;
-    uint32_t compensation   = 0x00100;
-
+    // only noted here: resample_prepare() applies it block by block, and
+    // brings the read position back onto a sample before going nominal
     if (sbc_frames_in_buffer < OPTIMAL_FRAMES_MIN){
-    	resampling_factor = nominal_factor - compensation;    // stretch samples
+        _resample_wanted = RESAMPLE_NOMINAL - RESAMPLE_COMPENSATION;    // stretch samples
     } else if (sbc_frames_in_buffer <= OPTIMAL_FRAMES_MAX){
-    	resampling_factor = nominal_factor;                   // nothing to do
+        _resample_wanted = RESAMPLE_NOMINAL;                            // nothing to do
     } else {
-    	resampling_factor = nominal_factor + compensation;    // compress samples
+        _resample_wanted = RESAMPLE_NOMINAL + RESAMPLE_COMPENSATION;    // compress samples
     }
-
-    btstack_resample_set_factor(&_resample_instance, resampling_factor);
 
     // start stream if enough frames buffered
     if (!_audio_stream_started && sbc_frames_in_buffer >= START_FRAMES){
