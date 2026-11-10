@@ -96,7 +96,8 @@ void fatal() {
 }
 
 
-void on_bt_up( void * ) {
+void on_bt_up( void *data ) {
+    (void) data;
     printf("Bluetooth stack is up\n");
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 }
