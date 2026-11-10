@@ -140,6 +140,10 @@ static int i2s_ctrl_chan[2];
 static volatile uint32_t silence_addr;      // read by the control channels: RAM
 
 static volatile uint32_t underrun_count;
+// Set once the DMA has been handed the first buffer of a stream, cleared when
+// the stream starts or stops. Silence played with no stream running, or while
+// the first buffers of one are still being filled, is not an underrun.
+static volatile bool     stream_flowing;
 static volatile uint32_t late_count;
 
 // 32 bit stereo frames, interleaved left/right, as the PIO pulls them
@@ -197,12 +201,13 @@ static void __time_critical_func(i2s_dma_handler)(void){
         if (buffer_ready[i]){
             chan_buffer[c] = (int8_t) i;
             src = audio_buffer[i];
+            if (fill_callback != NULL) stream_flowing = true;
             if (++i == PICO_AUDIO_I2S_NUM_BUFFERS) i = 0;
             next_buffer = i;
         } else {
             chan_buffer[c] = -1;
             src = silence_buffer;
-            underrun_count++;
+            if (stream_flowing && (fill_callback != NULL)) underrun_count++;
         }
 
         dma_channel_set_read_addr(ch, src, false);
@@ -376,6 +381,7 @@ void audio_out_set_volume(int32_t gain){
 }
 
 void audio_out_start(audio_out_fill_fn fill, void * context){
+    stream_flowing = false;
     fill_context  = context;
     fill_callback = fill;
     audio_out_service();
@@ -383,6 +389,7 @@ void audio_out_start(audio_out_fill_fn fill, void * context){
 
 void audio_out_stop(void){
     fill_callback = NULL;
+    stream_flowing = false;
     // the DMA drains what is queued and falls back to silence on its own
 }
 
