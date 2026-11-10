@@ -232,7 +232,12 @@ static void _usb_endpoint_hw_init(struct usb_endpoint *ep, __unused uintptr_t da
     uint32_t stride = _usb_endpoint_stride(ep);
     if (ep->double_buffered) stride <<= 1u;
     _device.next_buffer_offset += stride;
-    assert(_device.next_buffer_offset <= USB_DPRAM_MAX);
+    // PAB: check what the endpoint can actually touch, not the whole stride.
+    // Every isochronous endpoint reserves the same stride, so the feedback
+    // endpoint's reservation runs past the end of USB RAM although its 3 byte
+    // packets never get near it, and a Debug build stopped here.
+    assert(ep->dpram_buffer_offset + (ep->double_buffered ? _usb_endpoint_stride(ep) : 0u) + ep->buffer_size
+           <= USB_DPRAM_MAX);
     if (ep_num) {
         uint32_t reg = EP_CTRL_ENABLE_BITS
                        | (ep->double_buffered ? EP_CTRL_DOUBLE_BUFFERED_BITS : 0u)

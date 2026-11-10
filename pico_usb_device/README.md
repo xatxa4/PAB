@@ -11,10 +11,11 @@ The low-level USB device stack from Raspberry Pi's pico-extras, vendored for PAB
 BSD-3-Clause, Raspberry Pi (Trading) Ltd. See `LICENSE`.
 
 ## Changes
-Both are marked `// PAB:` in the source.
+All are marked `// PAB:` in the source.
 
 - `include/pico/usb_device.h`: `struct usb_buffer` `data_len` and `data_max` are `uint16_t` instead of `uint8_t`, so packets over 255 bytes work (24-bit 48 kHz stereo is 294). Same change as commit `993442c` in BambooMaster's pico-extras fork.
 - `usb_device.c`: the interrupt handler is a static `usb_device_irq_handler`, installed with `irq_set_exclusive_handler()` in `usb_device_start()`, instead of a global `isr_usbctrl`. A global `isr_usbctrl` overrides the vector table entry at link time even when nothing uses it, which breaks TinyUSB's USB console (`PAB_STDIO=usb`) and hangs the box at boot in Bluetooth mode. This one is PAB's own.
+- `usb_device.c`: the buffer-space assert in `_usb_endpoint_hw_init` checks the real extent of the endpoint's buffers, see the build note. PAB's own, and only compiled into Debug builds.
 
 ## Build note
-Every isochronous endpoint gets the same buffer stride (`PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE`, 1024 bytes here). The sound card's two double-buffered isochronous endpoints therefore reserve 0x180 + 0x800 + 0x800 = 0x1180 bytes of the 4 KB USB RAM. That works, because the feedback endpoint uses only 3 bytes of its second buffer, but a Debug build would trip `assert(next_buffer_offset <= USB_DPRAM_MAX)` (`usb_device.c`, `_usb_endpoint_hw_init`). PAB builds Release. Giving each endpoint its own stride would fix it; it is not done.
+Every isochronous endpoint gets the same buffer stride (`PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE`, 1024 bytes here). The sound card's two double-buffered isochronous endpoints therefore reserve 0x180 + 0x800 + 0x800 = 0x1180 bytes of the 4 KB USB RAM. That works, because the feedback endpoint uses only 3 bytes of its second buffer, and the assert in `_usb_endpoint_hw_init` (`usb_device.c`) now checks the bytes an endpoint can actually touch rather than the whole reservation, which a Debug build used to trip over. Giving each endpoint its own stride would be the tidier fix; it is not done.
