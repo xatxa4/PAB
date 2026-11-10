@@ -62,7 +62,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static void (*playback_callback)(int16_t * buffer, uint16_t num_frames);
+static pab_audio_playback_t playback_callback;
 
 static btstack_timer_source_t driver_timer_sink;
 static bool     sink_active;
@@ -80,7 +80,11 @@ static void sink_fill(int32_t * dst, uint32_t num_frames, void * context){
     while (num_frames){
         uint32_t frames = (num_frames < RENDER_FRAMES) ? num_frames : RENDER_FRAMES;
 
+#if PAB_AUDIO_PLAYBACK_TIMEINFO
+        (*playback_callback)(render_pcm, (uint16_t) frames, NULL);
+#else
         (*playback_callback)(render_pcm, (uint16_t) frames);
+#endif
 
         // shift as unsigned; negative operands make the signed shift undefined
         if (sink_channel_count == 1){
@@ -128,7 +132,7 @@ static void driver_timer_handler_sink(btstack_timer_source_t * ts){
 static int btstack_audio_pico_sink_init(
     uint8_t channels,
     uint32_t samplerate,
-    void (*playback)(int16_t * buffer, uint16_t num_samples)
+    pab_audio_playback_t playback
 ){
     btstack_assert(playback != NULL);
     btstack_assert(channels != 0);

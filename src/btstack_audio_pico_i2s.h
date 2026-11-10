@@ -44,6 +44,18 @@
 #define BTSTACK_AUDIO_PICO_I2S_H
 
 #include "btstack_audio.h"
+#include "pico/version.h"
+
+// The BTstack in Pico SDK 2.3 hands the playback callback a third argument,
+// the playback time of the first sample. PAB has no use for it, but the
+// callback has to have the type the sink interface declares.
+#if (PICO_SDK_VERSION_MAJOR > 2) || ((PICO_SDK_VERSION_MAJOR == 2) && (PICO_SDK_VERSION_MINOR >= 3))
+#define PAB_AUDIO_PLAYBACK_TIMEINFO 1
+typedef void (*pab_audio_playback_t)(int16_t * buffer, uint16_t num_frames, const btstack_audio_context_t * timeinfo);
+#else
+#define PAB_AUDIO_PLAYBACK_TIMEINFO 0
+typedef void (*pab_audio_playback_t)(int16_t * buffer, uint16_t num_frames);
+#endif
 
 const btstack_audio_sink_t * btstack_audio_pico_sink_get_instance(void);
 

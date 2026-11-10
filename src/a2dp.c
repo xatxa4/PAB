@@ -256,7 +256,12 @@ static void report_drops(void) {
 
 
 /// provide pcm frames to i2s sink
+#if PAB_AUDIO_PLAYBACK_TIMEINFO
+static void playback_handler(int16_t * buffer, uint16_t num_audio_frames, const btstack_audio_context_t * timeinfo) {
+    UNUSED(timeinfo);
+#else
 static void playback_handler(int16_t * buffer, uint16_t num_audio_frames) {
+#endif
 
     // called from lower-layer but guaranteed to be on main thread
     if (_sbc_frame_size == 0){
